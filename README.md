@@ -238,7 +238,7 @@ Current version: 0.1.0
 
 ## License
 
-This is licensed under BSD 3-Clause. See LICENSE for more details.
+This is licensed under BSD 3-Clause. See [LICENSE](https://github.com/RobertFlexx/YAFP/blob/master/LICENSE) for more details.
 
 ## Contributing
 
