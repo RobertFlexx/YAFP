@@ -34,10 +34,14 @@ static bool g_minimal    = false;
 
 #define LABEL_WIDTH 12
 
-// platform specific header
+// platform specific headers
 #ifdef __linux__
 #include <sys/sysinfo.h>
-#elif __OpenBSD__
+#elif defined(__FreeBSD__)
+#include <sys/sysctl.h>
+#elif defined(__OpenBSD__)
+#include <sys/sysctl.h>
+#elif defined(__NetBSD__)
 #include <sys/sysctl.h>
 #endif
 
@@ -48,10 +52,22 @@ void get_system_info() {
         if (sysinfo(&info) == 0) {
             printf("Total RAM: %ld MB\n", info.totalram / (1024 * 1024));
         }
-    #elif __OpenBSD__
-        struct sysinfo info;
+    #elif defined(__FreeBSD__)
+        struct sysctlinfo info;
+        size_t len = sizeof(info);
+        if (sysctlbyname("hw.physmem", &info, &len, NULL, 0) == 0) {
+            printf("Total RAM: %ld MB\n", info.totalram / (1024 * 1024));
+        }
+    #elif defined(__OpenBSD__)
+        struct sysctlinfo info;
         size_t len = sizeof(info);
         if (sysctlbyname("vm.stats", &info, &len, NULL, 0) == 0) {
+            printf("Total RAM: %ld MB\n", info.totalram / (1024 * 1024));
+        }
+    #elif defined(__NetBSD__)
+        struct sysctlinfo info;
+        size_t len = sizeof(info);
+        if (sysctlbyname("hw.physmem", &info, &len, NULL, 0) == 0) {
             printf("Total RAM: %ld MB\n", info.totalram / (1024 * 1024));
         }
     #else
