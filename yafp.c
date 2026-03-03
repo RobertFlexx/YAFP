@@ -8,7 +8,6 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <sys/utsname.h>
-#include <sys/sysinfo.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <pwd.h>
@@ -34,6 +33,32 @@ static bool g_use_color  = true;
 static bool g_minimal    = false;
 
 #define LABEL_WIDTH 12
+
+// platform specific header
+#ifdef __linux__
+#include <sys/sysinfo.h>
+#elif __OpenBSD__
+#include <sys/sysctl.h>
+#endif
+
+// function to get system information
+void get_system_info() {
+    #ifdef __linux__
+        struct sysinfo info;
+        if (sysinfo(&info) == 0) {
+            printf("Total RAM: %ld MB\n", info.totalram / (1024 * 1024));
+        }
+    #elif __OpenBSD__
+        struct sysinfo info;
+        size_t len = sizeof(info);
+        if (sysctlbyname("vm.stats", &info, &len, NULL, 0) == 0) {
+            printf("Total RAM: %ld MB\n", info.totalram / (1024 * 1024));
+        }
+    #else
+        printf("Unsupported platform\n");
+    #endif
+}
+
 
 /* ---------- tiny helpers ---------- */
 
