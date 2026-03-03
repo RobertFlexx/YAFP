@@ -20,8 +20,14 @@
 #include <ifaddrs.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <utmpx.h>
 #include <stdint.h>
+
+// platform specific headers
+#ifdef __linux__
+#include <utmpx.h>  // for Linux
+#elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#include <utmp.h>  // for BSD systems
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -34,7 +40,7 @@ static bool g_minimal    = false;
 
 #define LABEL_WIDTH 12
 
-// platform specific headers
+// platform specific headers 
 #ifdef __linux__
 #include <sys/sysinfo.h>
 #elif defined(__FreeBSD__)
@@ -74,6 +80,7 @@ void get_system_info() {
         printf("Unsupported platform\n");
     #endif
 }
+
 
 
 /* ---------- tiny helpers ---------- */
