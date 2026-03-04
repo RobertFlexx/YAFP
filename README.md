@@ -1,5 +1,5 @@
 # YAFP - Yet Another Fetch Program
-
+### SOLARIS an ILLUMOS support SOON!
 A lightweight, comprehensive system information tool for Linux, OpenBSD, macOS, FreeBSD, NetBSD, DragonFlyBSD, and more; written in C.
 
 ## Overview
