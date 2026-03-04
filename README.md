@@ -68,6 +68,32 @@ Or with all warnings:
 gcc -o yafp yafp.c -std=c11 -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L -Wall -Wextra -O2
 ```
 
+#### macOS (Apple Clang)
+
+On macOS use the Xcode command-line `clang`. Recommended flags:
+
+```bash
+clang -o yafp yafp.c -std=c11 -D_DARWIN_C_SOURCE -D_POSIX_C_SOURCE=200809L -Wall -Wextra -O2
+```
+
+Notes:
+
+* If you link against macOS frameworks or Homebrew libraries, add the appropriate `-framework` or `-L`/`-l` flags.
+* If you encounter missing types or header errors from system headers, ensure the source includes the usual system headers (for example `#include <sys/types.h>` before other `sys/*` headers) or compile with the `-D_DARWIN_C_SOURCE` define.
+
+#### OpenBSD (clang / cc)
+
+OpenBSD's default compiler is `cc` (a wrapper for clang). Recommended command:
+
+```bash
+cc -o yafp yafp.c -std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -Wall -Wextra -O2
+```
+
+Notes:
+
+* If you see errors in system headers complaining about types such as `u_long`, make sure your source includes `<sys/types.h>` (and any other required `sys/*` headers) before including other headers. Often these sort of errors are caused by missing header includes rather than the compiler itself.
+* If you still see issues, try compiling with `-I/usr/include` to force the compiler to use the system include path, and double-check for accidental defines that might hide typedefs.
+
 ### Installation to System
 
 ```bash

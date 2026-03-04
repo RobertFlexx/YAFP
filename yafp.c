@@ -1,5 +1,22 @@
+/*
+ * yafp - Yet Another Fetch Program
+ * Cross-platform system information display
+ * Supports: Linux, macOS, FreeBSD, OpenBSD, NetBSD, DragonFlyBSD
+ */
+
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE
+#endif
+
+#if defined(__NetBSD__)
+#define _NETBSD_SOURCE
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,100 +24,120 @@
 #include <strings.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <sys/types.h>
 #include <sys/utsname.h>
 #include <sys/ioctl.h>
-#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/time.h>
 #include <pwd.h>
+#include <grp.h>
 #include <errno.h>
 #include <dirent.h>
-#include <sys/statvfs.h>
 #include <ctype.h>
 #include <time.h>
 #include <limits.h>
-#include <ifaddrs.h>
+#include <stdint.h>
+#include <fcntl.h>
+
+#if defined(__linux__) || defined(__APPLE__)
+#include <sys/statvfs.h>
+#elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+#include <sys/param.h>
+#include <sys/mount.h>
+#endif
+
+#include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <stdint.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 
-// platform specific headers
-#ifdef __linux__
-#include <utmpx.h>  // for Linux
-#elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
-#include <utmp.h>  // for BSD systems
+#if defined(__linux__)
+#include <sys/sysinfo.h>
+#include <utmpx.h>
+#define HAVE_UTMPX 1
+#define HAVE_SYSINFO 1
+#define HAVE_PROC_FS 1
+
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
+#include <mach/mach.h>
+#include <mach/mach_host.h>
+#include <mach/vm_statistics.h>
+#include <utmpx.h>
+#include <CoreFoundation/CoreFoundation.h>
+#define HAVE_UTMPX 1
+#define HAVE_SYSCTL 1
+
+#elif defined(__FreeBSD__) || defined(__DragonFly__)
+#include <sys/sysctl.h>
+#include <sys/vmmeter.h>
+#include <vm/vm_param.h>
+#include <utmpx.h>
+#define HAVE_UTMPX 1
+#define HAVE_SYSCTL 1
+
+#elif defined(__OpenBSD__)
+#include <sys/sysctl.h>
+#include <sys/swap.h>
+#include <sys/sensors.h>
+#include <machine/cpu.h>
+#include <utmp.h>
+#define HAVE_UTMP 1
+#define HAVE_SYSCTL 1
+
+#elif defined(__NetBSD__)
+#include <sys/sysctl.h>
+#include <uvm/uvm_extern.h>
+#include <utmpx.h>
+#define HAVE_UTMPX 1
+#define HAVE_SYSCTL 1
+
+#else
+#define HAVE_GENERIC_POSIX 1
 #endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
 
-#define YAFP_VERSION "0.1.0"
+#define YAFP_VERSION "0.2.0"
 
-static bool g_use_color  = true;
-static bool g_minimal    = false;
+static bool g_use_color = true;
+static bool g_minimal   = false;
 
 #define LABEL_WIDTH 12
 
-// platform specific headers 
-#ifdef __linux__
-#include <sys/sysinfo.h>
-#elif defined(__FreeBSD__)
-#include <sys/sysctl.h>
-#elif defined(__OpenBSD__)
-#include <sys/sysctl.h>
-#elif defined(__NetBSD__)
-#include <sys/sysctl.h>
-#endif
-
-// function to get system information
-void get_system_info() {
-    #ifdef __linux__
-        struct sysinfo info;
-        if (sysinfo(&info) == 0) {
-            printf("Total RAM: %ld MB\n", info.totalram / (1024 * 1024));
-        }
-    #elif defined(__FreeBSD__)
-        struct sysctlinfo info;
-        size_t len = sizeof(info);
-        if (sysctlbyname("hw.physmem", &info, &len, NULL, 0) == 0) {
-            printf("Total RAM: %ld MB\n", info.totalram / (1024 * 1024));
-        }
-    #elif defined(__OpenBSD__)
-        struct sysctlinfo info;
-        size_t len = sizeof(info);
-        if (sysctlbyname("vm.stats", &info, &len, NULL, 0) == 0) {
-            printf("Total RAM: %ld MB\n", info.totalram / (1024 * 1024));
-        }
-    #elif defined(__NetBSD__)
-        struct sysctlinfo info;
-        size_t len = sizeof(info);
-        if (sysctlbyname("hw.physmem", &info, &len, NULL, 0) == 0) {
-            printf("Total RAM: %ld MB\n", info.totalram / (1024 * 1024));
-        }
-    #else
-        printf("Unsupported platform\n");
-    #endif
-}
-
-
-
-/* ---------- tiny helpers ---------- */
-
-static void die(const char *msg) {
+static void die(const char *msg)
+{
     perror(msg);
     exit(EXIT_FAILURE);
 }
 
-static char *xstrdup(const char *s) {
-    if (!s) return NULL;
+static char *xstrdup(const char *s)
+{
+    if (!s)
+        return NULL;
     size_t len = strlen(s);
     char *p = malloc(len + 1);
-    if (!p) die("malloc");
+    if (!p)
+        die("malloc");
     memcpy(p, s, len + 1);
     return p;
 }
 
-static void rstrip(char *s) {
-    if (!s) return;
+static char *xmalloc(size_t n)
+{
+    char *p = malloc(n);
+    if (!p)
+        die("malloc");
+    return p;
+}
+
+static void rstrip(char *s)
+{
+    if (!s)
+        return;
     size_t len = strlen(s);
     while (len > 0) {
         char c = s[len - 1];
@@ -111,11 +148,12 @@ static void rstrip(char *s) {
     }
 }
 
-static char *read_first_line_trim(const char *path) {
+static char *read_first_line_trim(const char *path)
+{
     FILE *f = fopen(path, "r");
     if (!f)
         return NULL;
-    char buf[256];
+    char buf[512];
     if (!fgets(buf, sizeof buf, f)) {
         fclose(f);
         return NULL;
@@ -125,9 +163,25 @@ static char *read_first_line_trim(const char *path) {
     return xstrdup(buf);
 }
 
-/* ---------- user / host ---------- */
+static char *run_command_first_line(const char *cmd)
+{
+    FILE *fp = popen(cmd, "r");
+    if (!fp)
+        return NULL;
+    char buf[512];
+    if (!fgets(buf, sizeof buf, fp)) {
+        pclose(fp);
+        return NULL;
+    }
+    pclose(fp);
+    rstrip(buf);
+    if (buf[0] == '\0')
+        return NULL;
+    return xstrdup(buf);
+}
 
-static char *get_username(void) {
+static char *get_username(void)
+{
     struct passwd *pw = getpwuid(getuid());
     if (pw && pw->pw_name)
         return xstrdup(pw->pw_name);
@@ -139,19 +193,115 @@ static char *get_username(void) {
     return xstrdup("user");
 }
 
-static char *get_hostname_simple(void) {
+static char *get_hostname_simple(void)
+{
     char buf[256];
     if (gethostname(buf, sizeof buf) == 0) {
         buf[sizeof(buf) - 1] = '\0';
+        char *dot = strchr(buf, '.');
+        if (dot)
+            *dot = '\0';
         return xstrdup(buf);
     }
-    return xstrdup("host");
+    return xstrdup("localhost");
 }
 
-/* ---------- OS / kernel / arch / host model ---------- */
+static char *get_os_pretty_name(void)
+{
+    struct utsname uts;
+    if (uname(&uts) != 0)
+        return xstrdup("Unknown");
 
-static char *get_host_model(void) {
-    char *vendor  = read_first_line_trim("/sys/class/dmi/id/sys_vendor");
+#if defined(__linux__)
+    FILE *f = fopen("/etc/os-release", "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof line, f)) {
+            if (strncmp(line, "PRETTY_NAME=", 12) == 0) {
+                char *p = line + 12;
+                while (*p == ' ' || *p == '\t')
+                    p++;
+                if (*p == '"' || *p == '\'') {
+                    char quote = *p++;
+                    char *end = strchr(p, quote);
+                    if (end)
+                        *end = '\0';
+                } else {
+                    rstrip(p);
+                }
+                fclose(f);
+                return xstrdup(p);
+            }
+        }
+        fclose(f);
+    }
+    
+    f = fopen("/etc/lsb-release", "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof line, f)) {
+            if (strncmp(line, "DISTRIB_DESCRIPTION=", 20) == 0) {
+                char *p = line + 20;
+                if (*p == '"') {
+                    p++;
+                    char *end = strchr(p, '"');
+                    if (end)
+                        *end = '\0';
+                } else {
+                    rstrip(p);
+                }
+                fclose(f);
+                return xstrdup(p);
+            }
+        }
+        fclose(f);
+    }
+    return xstrdup("Linux");
+
+#elif defined(__APPLE__)
+    char *version = run_command_first_line("sw_vers -productVersion 2>/dev/null");
+    char *name = run_command_first_line("sw_vers -productName 2>/dev/null");
+    
+    if (name && version) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "%s %s", name, version);
+        free(name);
+        free(version);
+        return xstrdup(buf);
+    }
+    free(name);
+    free(version);
+    return xstrdup("macOS");
+
+#elif defined(__FreeBSD__)
+    char buf[64];
+    snprintf(buf, sizeof buf, "FreeBSD %s", uts.release);
+    return xstrdup(buf);
+
+#elif defined(__OpenBSD__)
+    char buf[64];
+    snprintf(buf, sizeof buf, "OpenBSD %s", uts.release);
+    return xstrdup(buf);
+
+#elif defined(__NetBSD__)
+    char buf[64];
+    snprintf(buf, sizeof buf, "NetBSD %s", uts.release);
+    return xstrdup(buf);
+
+#elif defined(__DragonFly__)
+    char buf[64];
+    snprintf(buf, sizeof buf, "DragonFly %s", uts.release);
+    return xstrdup(buf);
+
+#else
+    return xstrdup(uts.sysname);
+#endif
+}
+
+static char *get_host_model(void)
+{
+#if defined(__linux__)
+    char *vendor = read_first_line_trim("/sys/class/dmi/id/sys_vendor");
     char *product = read_first_line_trim("/sys/class/dmi/id/product_name");
     char *result = NULL;
 
@@ -161,88 +311,105 @@ static char *get_host_model(void) {
         result = xstrdup(buf);
     } else if (product && *product) {
         result = xstrdup(product);
-    } else {
-        result = xstrdup("unknown");
     }
 
     free(vendor);
     free(product);
-    return result;
+    
+    if (result)
+        return result;
+    
+    char *model = read_first_line_trim("/sys/firmware/devicetree/base/model");
+    if (model)
+        return model;
+    
+    return xstrdup("Unknown");
+
+#elif defined(__APPLE__)
+    char model[256];
+    size_t len = sizeof(model);
+    if (sysctlbyname("hw.model", model, &len, NULL, 0) == 0)
+        return xstrdup(model);
+    return xstrdup("Apple Mac");
+
+#elif defined(HAVE_SYSCTL)
+    char buf[256];
+    size_t len = sizeof(buf);
+    
+#if defined(__FreeBSD__) || defined(__DragonFly__)
+    if (sysctlbyname("hw.hv_vendor", buf, &len, NULL, 0) == 0 && len > 0)
+        return xstrdup(buf);
+#endif
+    
+    int mib[2] = { CTL_HW, HW_MACHINE };
+    len = sizeof(buf);
+    if (sysctl(mib, 2, buf, &len, NULL, 0) == 0)
+        return xstrdup(buf);
+    
+    return xstrdup("Unknown");
+#else
+    return xstrdup("Unknown");
+#endif
 }
 
-static char *get_os_pretty_name(void) {
-    FILE *f = fopen("/etc/os-release", "r");
-    if (!f)
-        return xstrdup("Linux");
-
-    char *line = NULL;
-    size_t cap = 0;
-    char *result = NULL;
-
-    while (getline(&line, &cap, f) != -1) {
-        if (strncmp(line, "PRETTY_NAME=", 12) == 0) {
-            char *p = line + 12;
-            while (*p == ' ' || *p == '\t')
-                p++;
-
-            if (*p == '"' || *p == '\'') {
-                char quote = *p++;
-                char *start = p;
-                char *end = strchr(start, quote);
-                if (end)
-                    *end = '\0';
-                result = xstrdup(start);
-            } else {
-                rstrip(p);
-                result = xstrdup(p);
-            }
-            break;
-        }
-    }
-
-    free(line);
-    fclose(f);
-
-    if (!result)
-        result = xstrdup("Linux");
-
-    return result;
-}
-
-static char *get_kernel_release(void) {
+static char *get_kernel_release(void)
+{
     struct utsname uts;
     if (uname(&uts) == 0)
         return xstrdup(uts.release);
-    return xstrdup("unknown");
+    return xstrdup("Unknown");
 }
 
-static char *get_architecture(void) {
+static char *get_architecture(void)
+{
     struct utsname uts;
     if (uname(&uts) == 0)
         return xstrdup(uts.machine);
-    return xstrdup("unknown");
+    return xstrdup("Unknown");
 }
 
-/* ---------- uptime, run time, boot time ---------- */
-
-static char *format_uptime(long *out_secs) {
-    long secs = 0;
-    struct sysinfo info;
-
-    if (sysinfo(&info) == 0) {
-        secs = info.uptime;
-    } else {
-        FILE *f = fopen("/proc/uptime", "r");
-        if (f) {
-            double up = 0.0;
-            if (fscanf(f, "%lf", &up) == 1)
-                secs = (long) up;
+static long get_uptime_seconds(void)
+{
+#if defined(__linux__)
+#if HAVE_SYSINFO
+    struct sysinfo si;
+    if (sysinfo(&si) == 0)
+        return si.uptime;
+#endif
+    FILE *f = fopen("/proc/uptime", "r");
+    if (f) {
+        double up = 0.0;
+        if (fscanf(f, "%lf", &up) == 1) {
             fclose(f);
+            return (long)up;
         }
+        fclose(f);
     }
+    return -1;
 
-    if (secs < 0) secs = 0;
-    if (out_secs) *out_secs = secs;
+#elif defined(HAVE_SYSCTL)
+    struct timeval boottime;
+    size_t len = sizeof(boottime);
+    int mib[2] = { CTL_KERN, KERN_BOOTTIME };
+    
+    if (sysctl(mib, 2, &boottime, &len, NULL, 0) == 0) {
+        time_t now = time(NULL);
+        return (long)(now - boottime.tv_sec);
+    }
+    return -1;
+#else
+    return -1;
+#endif
+}
+
+static char *format_uptime(long *out_secs)
+{
+    long secs = get_uptime_seconds();
+    
+    if (secs < 0)
+        secs = 0;
+    if (out_secs)
+        *out_secs = secs;
 
     long days = secs / 86400;
     secs %= 86400;
@@ -261,41 +428,48 @@ static char *format_uptime(long *out_secs) {
     return xstrdup(buf);
 }
 
-static char *get_run_datetime(time_t *out_now) {
+static char *get_run_datetime(time_t *out_now)
+{
     time_t now = time(NULL);
     if (out_now)
         *out_now = now;
     if (now == (time_t)-1)
-        return xstrdup("unknown");
+        return xstrdup("Unknown");
     struct tm *tm = localtime(&now);
     if (!tm)
-        return xstrdup("unknown");
+        return xstrdup("Unknown");
 
     char buf[64];
     if (strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", tm) == 0)
-        return xstrdup("unknown");
+        return xstrdup("Unknown");
     return xstrdup(buf);
 }
 
-static char *format_boot_time(time_t now, long uptime_secs) {
+static char *format_boot_time(time_t now, long uptime_secs)
+{
     if (now == (time_t)-1 || uptime_secs <= 0)
-        return xstrdup("unknown");
+        return xstrdup("Unknown");
     time_t boot = now - uptime_secs;
     struct tm *tm = localtime(&boot);
     if (!tm)
-        return xstrdup("unknown");
+        return xstrdup("Unknown");
     char buf[64];
     if (strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", tm) == 0)
-        return xstrdup("unknown");
+        return xstrdup("Unknown");
     return xstrdup(buf);
 }
 
-/* ---------- shell / terminal / tty ---------- */
-
-static char *get_shell_name(void) {
+static char *get_shell_name(void)
+{
     const char *sh = getenv("SHELL");
+    if (!sh || !*sh) {
+        struct passwd *pw = getpwuid(getuid());
+        if (pw && pw->pw_shell)
+            sh = pw->pw_shell;
+    }
+    
     if (!sh || !*sh)
-        return xstrdup("unknown");
+        return xstrdup("Unknown");
 
     const char *slash = strrchr(sh, '/');
     if (slash && slash[1] != '\0')
@@ -304,34 +478,36 @@ static char *get_shell_name(void) {
     return xstrdup(sh);
 }
 
-static char *get_term_env(void) {
+static char *get_term_env(void)
+{
     const char *t = getenv("TERM");
     if (!t || !*t)
-        return xstrdup("unknown");
+        return xstrdup("Unknown");
     return xstrdup(t);
 }
 
-static char *get_tty_size(void) {
+static char *get_tty_size(void)
+{
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
         char buf[32];
         snprintf(buf, sizeof buf, "%dx%d", ws.ws_col, ws.ws_row);
         return xstrdup(buf);
     }
-    return xstrdup("unknown");
+    return xstrdup("Unknown");
 }
 
-static char *get_tty_path(void) {
+static char *get_tty_path(void)
+{
     char *name = ttyname(STDIN_FILENO);
     if (name)
         return xstrdup(name);
     return xstrdup("not a tty");
 }
 
-/* ---------- DE / session ---------- */
-
-static char *get_de_session(void) {
-    const char *de   = getenv("XDG_CURRENT_DESKTOP");
+static char *get_de_session(void)
+{
+    const char *de = getenv("XDG_CURRENT_DESKTOP");
     const char *sess = getenv("DESKTOP_SESSION");
 
     if (de && *de && sess && *sess) {
@@ -343,26 +519,26 @@ static char *get_de_session(void) {
         return xstrdup(de);
     if (sess && *sess)
         return xstrdup(sess);
+
+#if defined(__APPLE__)
+    return xstrdup("Aqua");
+#else
     return xstrdup("tty");
+#endif
 }
 
-/* ---------- CPU / memory ---------- */
-
-static char *get_cpu_info(long *threads_out) {
-    FILE *f = fopen("/proc/cpuinfo", "r");
-    if (!f) {
-        if (threads_out) *threads_out = 1;
-        return xstrdup("unknown");
-    }
-
-    char line[512];
+static char *get_cpu_info(long *threads_out)
+{
     char *model = NULL;
-    long threads = 0;
+    long threads = 1;
 
-    while (fgets(line, sizeof line, f)) {
-        if (strncasecmp(line, "model name", 10) == 0 ||
-            strncasecmp(line, "Hardware", 8) == 0) {
-            if (!model) {
+#if defined(__linux__)
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            if ((strncasecmp(line, "model name", 10) == 0 ||
+                 strncasecmp(line, "Hardware", 8) == 0) && !model) {
                 char *p = strchr(line, ':');
                 if (p) {
                     p++;
@@ -371,139 +547,315 @@ static char *get_cpu_info(long *threads_out) {
                     rstrip(p);
                     model = xstrdup(p);
                 }
-            }
             } else if (strncasecmp(line, "processor", 9) == 0) {
                 threads++;
             }
+        }
+        fclose(f);
+        if (threads > 1)
+            threads--;
     }
 
-    fclose(f);
+#elif defined(__APPLE__)
+    char brand[256];
+    size_t len = sizeof(brand);
+    if (sysctlbyname("machdep.cpu.brand_string", brand, &len, NULL, 0) == 0)
+        model = xstrdup(brand);
+    
+    int ncpu;
+    len = sizeof(ncpu);
+    if (sysctlbyname("hw.logicalcpu", &ncpu, &len, NULL, 0) == 0)
+        threads = ncpu;
+
+#elif defined(HAVE_SYSCTL)
+    int mib[2];
+    size_t len;
+    
+#if defined(__FreeBSD__) || defined(__DragonFly__)
+    char brand[256];
+    len = sizeof(brand);
+    if (sysctlbyname("hw.model", brand, &len, NULL, 0) == 0)
+        model = xstrdup(brand);
+#elif defined(__OpenBSD__) || defined(__NetBSD__)
+    char brand[256];
+    mib[0] = CTL_HW;
+    mib[1] = HW_MODEL;
+    len = sizeof(brand);
+    if (sysctl(mib, 2, brand, &len, NULL, 0) == 0)
+        model = xstrdup(brand);
+#endif
+
+    mib[0] = CTL_HW;
+    mib[1] = HW_NCPU;
+    int ncpu;
+    len = sizeof(ncpu);
+    if (sysctl(mib, 2, &ncpu, &len, NULL, 0) == 0)
+        threads = ncpu;
+#endif
 
     if (!model)
-        model = xstrdup("unknown");
-    if (threads <= 0)
+        model = xstrdup("Unknown");
+    if (threads < 1)
         threads = 1;
     if (threads_out)
         *threads_out = threads;
 
     char buf[512];
-    snprintf(buf, sizeof buf, "%s (%ld thread%s)", model, threads,
-             (threads == 1 ? "" : "s"));
+    snprintf(buf, sizeof buf, "%s (%ld %s)",
+             model, threads, threads == 1 ? "thread" : "threads");
     free(model);
     return xstrdup(buf);
 }
 
-static char *get_cpu_governor(void) {
+static char *get_cpu_governor(void)
+{
+#if defined(__linux__)
     char *gov = read_first_line_trim("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor");
-    if (!gov)
-        return xstrdup("unknown");
-    return gov;
+    if (gov)
+        return gov;
+#endif
+    return xstrdup("N/A");
 }
 
-static char *get_cpu_temp(void) {
+static char *get_cpu_temp(void)
+{
+#if defined(__linux__)
     DIR *dir = opendir("/sys/class/thermal");
-    if (!dir)
-        return xstrdup("unknown");
+    if (dir) {
+        struct dirent *ent;
+        while ((ent = readdir(dir)) != NULL) {
+            if (strncmp(ent->d_name, "thermal_zone", 12) != 0)
+                continue;
 
-    struct dirent *ent;
-    char temp_path[PATH_MAX];
-    temp_path[0] = '\0';
+            char type_path[PATH_MAX];
+            snprintf(type_path, sizeof type_path, "/sys/class/thermal/%s/type", ent->d_name);
+            char *type = read_first_line_trim(type_path);
+            if (!type)
+                continue;
 
-    while ((ent = readdir(dir)) != NULL) {
-        if (strncmp(ent->d_name, "thermal_zone", 12) != 0)
-            continue;
+            char lower[128];
+            size_t len = strlen(type);
+            if (len >= sizeof(lower))
+                len = sizeof(lower) - 1;
+            for (size_t i = 0; i < len; ++i)
+                lower[i] = (char)tolower((unsigned char)type[i]);
+            lower[len] = '\0';
 
-        char type_path[PATH_MAX];
-        snprintf(type_path, sizeof type_path, "/sys/class/thermal/%s/type", ent->d_name);
-        char *type = read_first_line_trim(type_path);
-        if (!type)
-            continue;
-
-        char lower[128];
-        size_t len = strlen(type);
-        if (len >= sizeof(lower))
-            len = sizeof(lower) - 1;
-        for (size_t i = 0; i < len; ++i)
-            lower[i] = (char)tolower((unsigned char)type[i]);
-        lower[len] = '\0';
-
-        if (strstr(lower, "cpu") ||
-            strstr(lower, "x86_pkg_temp") ||
-            strstr(lower, "package id 0") ||
-            strstr(lower, "tctl")) {
-            snprintf(temp_path, sizeof temp_path, "/sys/class/thermal/%s/temp", ent->d_name);
-        free(type);
-        break;
-            }
-
+            bool is_cpu = strstr(lower, "cpu") ||
+                         strstr(lower, "x86_pkg") ||
+                         strstr(lower, "coretemp") ||
+                         strstr(lower, "k10temp") ||
+                         strstr(lower, "acpitz");
             free(type);
+
+            if (is_cpu) {
+                char temp_path[PATH_MAX];
+                snprintf(temp_path, sizeof temp_path, "/sys/class/thermal/%s/temp", ent->d_name);
+                FILE *f = fopen(temp_path, "r");
+                if (f) {
+                    long value;
+                    if (fscanf(f, "%ld", &value) == 1) {
+                        fclose(f);
+                        closedir(dir);
+                        char buf[32];
+                        snprintf(buf, sizeof buf, "%.1f°C", value / 1000.0);
+                        return xstrdup(buf);
+                    }
+                    fclose(f);
+                }
+            }
+        }
+        closedir(dir);
+    }
+    
+    dir = opendir("/sys/class/hwmon");
+    if (dir) {
+        struct dirent *ent;
+        while ((ent = readdir(dir)) != NULL) {
+            if (ent->d_name[0] == '.')
+                continue;
+            
+            char temp_path[PATH_MAX];
+            snprintf(temp_path, sizeof temp_path, "/sys/class/hwmon/%s/temp1_input", ent->d_name);
+            FILE *f = fopen(temp_path, "r");
+            if (f) {
+                long value;
+                if (fscanf(f, "%ld", &value) == 1) {
+                    fclose(f);
+                    closedir(dir);
+                    char buf[32];
+                    snprintf(buf, sizeof buf, "%.1f°C", value / 1000.0);
+                    return xstrdup(buf);
+                }
+                fclose(f);
+            }
+        }
+        closedir(dir);
     }
 
-    closedir(dir);
+#elif defined(__FreeBSD__) || defined(__DragonFly__)
+    int temp;
+    size_t len = sizeof(temp);
+    if (sysctlbyname("dev.cpu.0.temperature", &temp, &len, NULL, 0) == 0) {
+        char buf[32];
+        if (temp > 2000) {
+            snprintf(buf, sizeof buf, "%.1f°C", (temp - 2732) / 10.0);
+        } else {
+            snprintf(buf, sizeof buf, "%d°C", temp);
+        }
+        return xstrdup(buf);
+    }
 
-    if (!temp_path[0])
-        return xstrdup("unknown");
+#elif defined(__OpenBSD__)
+    int mib[5] = { CTL_HW, HW_SENSORS, 0, SENSOR_TEMP, 0 };
+    struct sensor sens;
+    size_t len = sizeof(sens);
+    
+    for (int dev = 0; dev < 10; dev++) {
+        mib[2] = dev;
+        for (int idx = 0; idx < 10; idx++) {
+            mib[4] = idx;
+            if (sysctl(mib, 5, &sens, &len, NULL, 0) == 0) {
+                if (sens.status == SENSOR_S_OK) {
+                    char buf[32];
+                    double celsius = (sens.value - 273150000) / 1000000.0;
+                    snprintf(buf, sizeof buf, "%.1f°C", celsius);
+                    return xstrdup(buf);
+                }
+            }
+        }
+    }
 
-    FILE *f = fopen(temp_path, "r");
-    if (!f)
-        return xstrdup("unknown");
-    long value = 0;
-    if (fscanf(f, "%ld", &value) != 1) {
+#elif defined(__APPLE__)
+    return xstrdup("N/A");
+#endif
+
+    return xstrdup("N/A");
+}
+
+static char *get_memory_usage(double *out_percent)
+{
+    unsigned long long total_kb = 0, used_kb = 0;
+
+#if defined(__linux__)
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (f) {
+        unsigned long long avail_kb = 0, buffers_kb = 0, cached_kb = 0;
+        char line[256];
+        
+        while (fgets(line, sizeof line, f)) {
+            char key[32];
+            unsigned long long value;
+            if (sscanf(line, "%31s %llu", key, &value) >= 2) {
+                if (strcmp(key, "MemTotal:") == 0)
+                    total_kb = value;
+                else if (strcmp(key, "MemAvailable:") == 0)
+                    avail_kb = value;
+                else if (strcmp(key, "Buffers:") == 0)
+                    buffers_kb = value;
+                else if (strcmp(key, "Cached:") == 0)
+                    cached_kb = value;
+            }
+        }
         fclose(f);
-        return xstrdup("unknown");
-    }
-    fclose(f);
-
-    double c = value / 1000.0;
-    char buf[32];
-    snprintf(buf, sizeof buf, "%.1f°C", c);
-    return xstrdup(buf);
-}
-
-static char *get_memory_usage(double *out_percent) {
-    FILE *f = fopen("/proc/meminfo", "r");
-    if (!f) {
-        if (out_percent) *out_percent = -1.0;
-        return xstrdup("unknown");
+        
+        if (avail_kb > 0)
+            used_kb = total_kb - avail_kb;
+        else
+            used_kb = total_kb - buffers_kb - cached_kb;
     }
 
-    long long mem_total_kb = 0;
-    long long mem_avail_kb = 0;
-
-    char line[256];
-    while (fgets(line, sizeof line, f)) {
-        char key[32];
-        long long value = 0;
-        char unit[32] = {0};
-
-        if (sscanf(line, "%31s %lld %31s", key, &value, unit) != 3)
-            continue;
-
-        if (strcmp(key, "MemTotal:") == 0)
-            mem_total_kb = value;
-        else if (strcmp(key, "MemAvailable:") == 0)
-            mem_avail_kb = value;
+#elif defined(__APPLE__)
+    int64_t physmem;
+    size_t len = sizeof(physmem);
+    if (sysctlbyname("hw.memsize", &physmem, &len, NULL, 0) == 0)
+        total_kb = physmem / 1024;
+    
+    mach_port_t host = mach_host_self();
+    vm_size_t pagesize;
+    host_page_size(host, &pagesize);
+    
+    vm_statistics64_data_t vm_stat;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    
+    if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm_stat, &count) == KERN_SUCCESS) {
+        unsigned long long free_pages = vm_stat.free_count + vm_stat.inactive_count;
+        unsigned long long free_kb = (free_pages * pagesize) / 1024;
+        used_kb = total_kb - free_kb;
     }
 
-    fclose(f);
+#elif defined(__FreeBSD__) || defined(__DragonFly__)
+    unsigned long physmem;
+    size_t len = sizeof(physmem);
+    if (sysctlbyname("hw.physmem", &physmem, &len, NULL, 0) == 0)
+        total_kb = physmem / 1024;
+    
+    unsigned int pagesize;
+    len = sizeof(pagesize);
+    sysctlbyname("hw.pagesize", &pagesize, &len, NULL, 0);
+    
+    unsigned int inactive, cache, free_count;
+    len = sizeof(inactive);
+    sysctlbyname("vm.stats.vm.v_inactive_count", &inactive, &len, NULL, 0);
+    len = sizeof(cache);
+    sysctlbyname("vm.stats.vm.v_cache_count", &cache, &len, NULL, 0);
+    len = sizeof(free_count);
+    sysctlbyname("vm.stats.vm.v_free_count", &free_count, &len, NULL, 0);
+    
+    unsigned long long free_kb = ((unsigned long long)(inactive + cache + free_count) * pagesize) / 1024;
+    used_kb = total_kb - free_kb;
 
-    if (mem_total_kb <= 0) {
-        if (out_percent) *out_percent = -1.0;
-        return xstrdup("unknown");
+#elif defined(__OpenBSD__)
+    int mib[2];
+    size_t len;
+    
+    mib[0] = CTL_HW;
+    mib[1] = HW_PHYSMEM64;
+    int64_t physmem;
+    len = sizeof(physmem);
+    if (sysctl(mib, 2, &physmem, &len, NULL, 0) == 0)
+        total_kb = physmem / 1024;
+    
+    mib[0] = CTL_VM;
+    mib[1] = VM_UVMEXP;
+    struct uvmexp uvm;
+    len = sizeof(uvm);
+    if (sysctl(mib, 2, &uvm, &len, NULL, 0) == 0) {
+        unsigned long long free_kb = ((unsigned long long)(uvm.free + uvm.inactive) * uvm.pagesize) / 1024;
+        used_kb = total_kb - free_kb;
     }
-    if (mem_avail_kb <= 0)
-        mem_avail_kb = mem_total_kb / 2;
 
-    long long used_kb  = mem_total_kb - mem_avail_kb;
-    double total_mib   = (double) mem_total_kb / 1024.0;
-    double used_mib    = (double) used_kb / 1024.0;
+#elif defined(__NetBSD__)
+    int mib[2];
+    size_t len;
+    
+    mib[0] = CTL_HW;
+    mib[1] = HW_PHYSMEM64;
+    int64_t physmem;
+    len = sizeof(physmem);
+    if (sysctl(mib, 2, &physmem, &len, NULL, 0) == 0)
+        total_kb = physmem / 1024;
+    
+    struct uvmexp_sysctl uvm;
+    mib[0] = CTL_VM;
+    mib[1] = VM_UVMEXP2;
+    len = sizeof(uvm);
+    if (sysctl(mib, 2, &uvm, &len, NULL, 0) == 0) {
+        unsigned long long free_kb = ((unsigned long long)(uvm.free + uvm.inactive) * uvm.pagesize) / 1024;
+        used_kb = total_kb - free_kb;
+    }
+#endif
 
-    if (total_mib <= 0.0) {
-        if (out_percent) *out_percent = -1.0;
-        return xstrdup("unknown");
+    if (total_kb == 0) {
+        if (out_percent)
+            *out_percent = -1.0;
+        return xstrdup("Unknown");
     }
 
-    double percent = used_mib * 100.0 / total_mib;
+    double total_mib = total_kb / 1024.0;
+    double used_mib = used_kb / 1024.0;
+    double percent = (used_mib / total_mib) * 100.0;
+
     if (out_percent)
         *out_percent = percent;
 
@@ -513,45 +865,81 @@ static char *get_memory_usage(double *out_percent) {
     return xstrdup(buf);
 }
 
-static char *get_swap_usage(double *out_percent) {
+static char *get_swap_usage(double *out_percent)
+{
+    unsigned long long total_kb = 0, used_kb = 0;
+
+#if defined(__linux__)
     FILE *f = fopen("/proc/meminfo", "r");
-    if (!f) {
-        if (out_percent) *out_percent = -1.0;
-        return xstrdup("unknown");
+    if (f) {
+        unsigned long long free_kb = 0;
+        char line[256];
+        
+        while (fgets(line, sizeof line, f)) {
+            char key[32];
+            unsigned long long value;
+            if (sscanf(line, "%31s %llu", key, &value) >= 2) {
+                if (strcmp(key, "SwapTotal:") == 0)
+                    total_kb = value;
+                else if (strcmp(key, "SwapFree:") == 0)
+                    free_kb = value;
+            }
+        }
+        fclose(f);
+        used_kb = total_kb - free_kb;
     }
 
-    long long swap_total_kb = 0;
-    long long swap_free_kb  = -1;
-
-    char line[256];
-    while (fgets(line, sizeof line, f)) {
-        char key[32];
-        long long value = 0;
-        char unit[32] = {0};
-
-        if (sscanf(line, "%31s %lld %31s", key, &value, unit) != 3)
-            continue;
-
-        if (strcmp(key, "SwapTotal:") == 0)
-            swap_total_kb = value;
-        else if (strcmp(key, "SwapFree:") == 0)
-            swap_free_kb = value;
+#elif defined(__APPLE__)
+    struct xsw_usage xsu;
+    size_t len = sizeof(xsu);
+    if (sysctlbyname("vm.swapusage", &xsu, &len, NULL, 0) == 0) {
+        total_kb = xsu.xsu_total / 1024;
+        used_kb = xsu.xsu_used / 1024;
     }
 
-    fclose(f);
-
-    if (swap_total_kb <= 0) {
-        if (out_percent) *out_percent = -1.0;
-        return xstrdup("disabled");
+#elif defined(__FreeBSD__) || defined(__DragonFly__)
+    char *output = run_command_first_line("swapctl -sk 2>/dev/null | awk '{print $2, $4}'");
+    if (output) {
+        sscanf(output, "%llu %llu", &total_kb, &used_kb);
+        free(output);
     }
 
-    if (swap_free_kb < 0)
-        swap_free_kb = 0;
+#elif defined(__OpenBSD__)
+    int nswap = swapctl(SWAP_NSWAP, NULL, 0);
+    if (nswap > 0) {
+        struct swapent *sep = xmalloc(nswap * sizeof(struct swapent));
+        if (swapctl(SWAP_STATS, sep, nswap) >= 0) {
+            for (int i = 0; i < nswap; i++) {
+                total_kb += (unsigned long long)sep[i].se_nblks * DEV_BSIZE / 1024;
+                used_kb += (unsigned long long)sep[i].se_inuse * DEV_BSIZE / 1024;
+            }
+        }
+        free(sep);
+    }
 
-    long long used_kb = swap_total_kb - swap_free_kb;
-    double total_mib  = (double) swap_total_kb / 1024.0;
-    double used_mib   = (double) used_kb / 1024.0;
-    double percent    = (total_mib > 0.0) ? used_mib * 100.0 / total_mib : 0.0;
+#elif defined(__NetBSD__)
+    int nswap = swapctl(SWAP_NSWAP, NULL, 0);
+    if (nswap > 0) {
+        struct swapent *sep = xmalloc(nswap * sizeof(struct swapent));
+        if (swapctl(SWAP_STATS, sep, nswap) >= 0) {
+            for (int i = 0; i < nswap; i++) {
+                total_kb += (unsigned long long)sep[i].se_nblks * DEV_BSIZE / 1024;
+                used_kb += (unsigned long long)sep[i].se_inuse * DEV_BSIZE / 1024;
+            }
+        }
+        free(sep);
+    }
+#endif
+
+    if (total_kb == 0) {
+        if (out_percent)
+            *out_percent = -1.0;
+        return xstrdup("Disabled");
+    }
+
+    double total_mib = total_kb / 1024.0;
+    double used_mib = used_kb / 1024.0;
+    double percent = (used_mib / total_mib) * 100.0;
 
     if (out_percent)
         *out_percent = percent;
@@ -562,26 +950,41 @@ static char *get_swap_usage(double *out_percent) {
     return xstrdup(buf);
 }
 
-/* ---------- disk + fs type ---------- */
-
-static char *get_disk_root_usage(double *out_percent) {
+static char *get_disk_root_usage(double *out_percent)
+{
+#if defined(__linux__) || defined(__APPLE__)
     struct statvfs st;
     if (statvfs("/", &st) != 0) {
-        if (out_percent) *out_percent = -1.0;
-        return xstrdup("unknown");
+        if (out_percent)
+            *out_percent = -1.0;
+        return xstrdup("Unknown");
     }
 
-    unsigned long long total = (unsigned long long) st.f_blocks * st.f_frsize;
-    unsigned long long used  = (unsigned long long) (st.f_blocks - st.f_bfree) * st.f_frsize;
+    unsigned long long total = (unsigned long long)st.f_blocks * st.f_frsize;
+    unsigned long long avail = (unsigned long long)st.f_bavail * st.f_frsize;
+    unsigned long long used = total - avail;
+#else
+    struct statfs st;
+    if (statfs("/", &st) != 0) {
+        if (out_percent)
+            *out_percent = -1.0;
+        return xstrdup("Unknown");
+    }
+
+    unsigned long long total = (unsigned long long)st.f_blocks * st.f_bsize;
+    unsigned long long avail = (unsigned long long)st.f_bavail * st.f_bsize;
+    unsigned long long used = total - avail;
+#endif
 
     if (total == 0) {
-        if (out_percent) *out_percent = -1.0;
-        return xstrdup("unknown");
+        if (out_percent)
+            *out_percent = -1.0;
+        return xstrdup("Unknown");
     }
 
-    double total_gib = (double) total / (1024.0 * 1024.0 * 1024.0);
-    double used_gib  = (double) used  / (1024.0 * 1024.0 * 1024.0);
-    double percent   = used_gib * 100.0 / total_gib;
+    double total_gib = total / (1024.0 * 1024.0 * 1024.0);
+    double used_gib = used / (1024.0 * 1024.0 * 1024.0);
+    double percent = (used_gib / total_gib) * 100.0;
 
     if (out_percent)
         *out_percent = percent;
@@ -592,495 +995,71 @@ static char *get_disk_root_usage(double *out_percent) {
     return xstrdup(buf);
 }
 
-static char *get_root_fs_type(void) {
+static char *get_root_fs_type(void)
+{
+#if defined(__linux__)
     FILE *f = fopen("/proc/self/mounts", "r");
-    if (!f)
-        return xstrdup("unknown");
-
-    char line[512];
-    char dev[256], mnt[256], type[64];
-
-    while (fgets(line, sizeof line, f)) {
-        dev[0] = mnt[0] = type[0] = '\0';
-        if (sscanf(line, "%255s %255s %63s", dev, mnt, type) != 3)
-            continue;
-        if (strcmp(mnt, "/") == 0) {
-            fclose(f);
-            return xstrdup(type);
-        }
-    }
-
-    fclose(f);
-    return xstrdup("unknown");
-}
-
-static char *get_root_mount_device(void) {
-    FILE *f = fopen("/proc/self/mounts", "r");
-    if (!f)
-        return xstrdup("unknown");
-
-    char line[512];
-    char dev[256], mnt[256];
-    while (fgets(line, sizeof line, f)) {
-        dev[0] = mnt[0] = '\0';
-        if (sscanf(line, "%255s %255s", dev, mnt) != 2)
-            continue;
-        if (strcmp(mnt, "/") == 0) {
-            fclose(f);
-            return xstrdup(dev);
-        }
-    }
-
-    fclose(f);
-    return xstrdup("unknown");
-}
-
-static char *guess_block_name_from_dev(const char *dev) {
-    if (!dev || strncmp(dev, "/dev/", 5) != 0)
-        return NULL;
-    const char *name = dev + 5;
-
-    DIR *dir = opendir("/sys/block");
-    if (!dir)
-        return NULL;
-
-    struct dirent *ent;
-    char *match = NULL;
-
-    while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] == '.')
-            continue;
-        if (strstr(name, ent->d_name) != NULL) {
-            match = xstrdup(ent->d_name);
-            break;
-        }
-    }
-
-    closedir(dir);
-    return match;
-}
-
-static char *get_root_disk_type(void) {
-    char *dev = get_root_mount_device();
-    char *block = guess_block_name_from_dev(dev);
-    char buf[128];
-
-    if (!dev || strcmp(dev, "unknown") == 0 || !block) {
-        snprintf(buf, sizeof buf, "unknown");
-        if (dev) free(dev);
-        if (block) free(block);
-        return xstrdup(buf);
-    }
-
-    const char *type = NULL;
-
-    if (strncmp(dev, "/dev/nvme", 9) == 0) {
-        type = "NVMe SSD";
-    } else if (strncmp(dev, "/dev/mmc", 8) == 0) {
-        type = "eMMC/SD";
-    } else if (strncmp(dev, "/dev/sd", 7) == 0 ||
-        strncmp(dev, "/dev/vd", 7) == 0 ||
-        strncmp(dev, "/dev/hd", 7) == 0) {
-        char path[256];
-    snprintf(path, sizeof path, "/sys/block/%s/queue/rotational", block);
-    FILE *f = fopen(path, "r");
     if (f) {
-        int rot = -1;
-        if (fscanf(f, "%d", &rot) == 1) {
-            if (rot == 0)
-                type = "SSD";
-            else if (rot == 1)
-                type = "HDD";
-        }
-        fclose(f);
-    }
-        }
-
-        if (!type) {
-            if (strcmp(dev, "overlay") == 0)
-                snprintf(buf, sizeof buf, "virtual (overlay)");
-            else
-                snprintf(buf, sizeof buf, "unknown (%s)", block);
-        } else {
-            snprintf(buf, sizeof buf, "%s (%s)", type, block);
-        }
-
-        free(dev);
-        free(block);
-        return xstrdup(buf);
-}
-
-/* ---------- battery ---------- */
-
-static char *get_battery_status(void) {
-    DIR *dir = opendir("/sys/class/power_supply");
-    if (!dir)
-        return xstrdup("none");
-
-    struct dirent *ent;
-    char *result = NULL;
-
-    while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] == '.')
-            continue;
-        if (strncmp(ent->d_name, "BAT", 3) != 0)
-            continue;
-
-        char path_cap[512];
-        char path_stat[512];
-        snprintf(path_cap, sizeof path_cap,
-                 "/sys/class/power_supply/%s/capacity", ent->d_name);
-        snprintf(path_stat, sizeof path_stat,
-                 "/sys/class/power_supply/%s/status", ent->d_name);
-
-        char *cap_str  = read_first_line_trim(path_cap);
-        char *stat_str = read_first_line_trim(path_stat);
-
-        const char *ac_state = NULL;
-        if (stat_str) {
-            if (strcmp(stat_str, "Charging") == 0 ||
-                strcmp(stat_str, "Full") == 0 ||
-                strcmp(stat_str, "Not charging") == 0)
-                ac_state = "on AC";
-            else if (strcmp(stat_str, "Discharging") == 0)
-                ac_state = "on battery";
-        }
-
-        if (cap_str && stat_str && ac_state) {
-            char buf[160];
-            snprintf(buf, sizeof buf, "%s%% (%s, %s)", cap_str, stat_str, ac_state);
-            result = xstrdup(buf);
-        } else if (cap_str && stat_str) {
-            char buf[160];
-            snprintf(buf, sizeof buf, "%s%% (%s)", cap_str, stat_str);
-            result = xstrdup(buf);
-        } else if (cap_str) {
-            char buf[64];
-            snprintf(buf, sizeof buf, "%s%%", cap_str);
-            result = xstrdup(buf);
-        }
-
-        free(cap_str);
-        free(stat_str);
-
-        if (result)
-            break;
-    }
-
-    closedir(dir);
-
-    if (!result)
-        result = xstrdup("none");
-
-    return result;
-}
-
-/* ---------- packages ---------- */
-
-static long count_dpkg_status(void) {
-    FILE *f = fopen("/var/lib/dpkg/status", "r");
-    if (!f)
-        return -1;
-
-    char line[512];
-    long count = 0;
-
-    while (fgets(line, sizeof line, f)) {
-        if (strncmp(line, "Package:", 8) == 0)
-            count++;
-    }
-
-    fclose(f);
-    if (count <= 0)
-        return -1;
-    return count;
-}
-
-static long count_dir_entries(const char *path) {
-    DIR *dir = opendir(path);
-    if (!dir)
-        return -1;
-
-    struct dirent *ent;
-    long count = 0;
-
-    while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] == '.')
-            continue;
-        count++;
-    }
-
-    closedir(dir);
-    if (count <= 0)
-        return -1;
-    return count;
-}
-
-static long count_pacman_local(void) {
-    return count_dir_entries("/var/lib/pacman/local");
-}
-
-static long count_flatpak_apps(void) {
-    long total = 0;
-    bool any = false;
-
-    long system = count_dir_entries("/var/lib/flatpak/app");
-    if (system > 0) {
-        total += system;
-        any = true;
-    }
-
-    const char *home = getenv("HOME");
-    if (home && *home) {
-        char path[PATH_MAX];
-        snprintf(path, sizeof path, "%s/.local/share/flatpak/app", home);
-        long user = count_dir_entries(path);
-        if (user > 0) {
-            total += user;
-            any = true;
-        }
-    }
-
-    if (!any)
-        return -1;
-    return total;
-}
-
-static char *get_package_summary(void) {
-    long base_count = -1;
-    const char *base_label = NULL;
-
-    long dpkg_count   = count_dpkg_status();
-    long pacman_count = count_pacman_local();
-
-    if (dpkg_count > 0) {
-        base_count  = dpkg_count;
-        base_label  = "dpkg";
-    } else if (pacman_count > 0) {
-        base_count  = pacman_count;
-        base_label  = "pacman";
-    }
-
-    long flatpak_count = count_flatpak_apps();
-
-    char buf[256];
-    buf[0] = '\0';
-    int first = 1;
-
-    if (base_count > 0 && base_label) {
-        char part[64];
-        snprintf(part, sizeof part, "%ld (%s)", base_count, base_label);
-        strncat(buf, part, sizeof(buf) - strlen(buf) - 1);
-        first = 0;
-    }
-
-    if (flatpak_count > 0) {
-        char part[64];
-        snprintf(part, sizeof part, "%ld (flatpak)", flatpak_count);
-
-        if (!first && strlen(buf) < sizeof(buf) - 2)
-            strncat(buf, " ", sizeof(buf) - strlen(buf) - 1);
-
-        strncat(buf, part, sizeof(buf) - strlen(buf) - 1);
-        first = 0;
-    }
-
-    if (buf[0] == '\0')
-        return xstrdup("unknown");
-    return xstrdup(buf);
-}
-
-/* ---------- gcc ---------- */
-
-static char *get_gcc_version(void) {
-    FILE *pipe = popen("gcc --version 2>/dev/null", "r");
-    if (!pipe)
-        return xstrdup("not found");
-
-    char buf[256];
-    if (!fgets(buf, sizeof buf, pipe)) {
-        pclose(pipe);
-        return xstrdup("not found");
-    }
-
-    pclose(pipe);
-    rstrip(buf);
-    if (buf[0] == '\0')
-        return xstrdup("not found");
-    return xstrdup(buf);
-}
-
-/* ---------- load avg ---------- */
-
-static char *get_loadavg(double *one_min) {
-    FILE *f = fopen("/proc/loadavg", "r");
-    if (!f) {
-        if (one_min) *one_min = -1.0;
-        return xstrdup("unknown");
-    }
-    double a, b, c;
-    if (fscanf(f, "%lf %lf %lf", &a, &b, &c) != 3) {
-        fclose(f);
-        if (one_min) *one_min = -1.0;
-        return xstrdup("unknown");
-    }
-    fclose(f);
-    if (one_min)
-        *one_min = a;
-    char buf[64];
-    snprintf(buf, sizeof buf, "%.2f %.2f %.2f", a, b, c);
-    return xstrdup(buf);
-}
-
-/* ---------- GPU ---------- */
-
-static const char *map_pci_vendor(const char *id) {
-    if (!id) return "Unknown";
-    if (strcmp(id, "0x8086") == 0) return "Intel";
-    if (strcmp(id, "0x10de") == 0) return "NVIDIA";
-    if (strcmp(id, "0x1002") == 0 || strcmp(id, "0x1022") == 0) return "AMD";
-    return "Unknown";
-}
-
-static char *get_gpu_info(void) {
-    DIR *dir = opendir("/sys/class/drm");
-    if (!dir)
-        return xstrdup("unknown");
-
-    struct dirent *ent;
-    char device_path[PATH_MAX];
-    device_path[0] = '\0';
-
-    while ((ent = readdir(dir)) != NULL) {
-        if (strncmp(ent->d_name, "card", 4) == 0 &&
-            strchr(ent->d_name, '-') == NULL) {
-            snprintf(device_path, sizeof device_path,
-                     "/sys/class/drm/%s/device", ent->d_name);
-            break;
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            char dev[256], mnt[256], type[64];
+            if (sscanf(line, "%255s %255s %63s", dev, mnt, type) == 3) {
+                if (strcmp(mnt, "/") == 0) {
+                    fclose(f);
+                    return xstrdup(type);
+                }
             }
-    }
-    closedir(dir);
-
-    if (!device_path[0])
-        return xstrdup("unknown");
-
-    char vendor_path[PATH_MAX], dev_path[PATH_MAX], driver_link_path[PATH_MAX];
-    snprintf(vendor_path, sizeof vendor_path, "%s/vendor", device_path);
-    snprintf(dev_path, sizeof dev_path, "%s/device", device_path);
-    snprintf(driver_link_path, sizeof driver_link_path, "%s/driver", device_path);
-
-    char *vendor_id = read_first_line_trim(vendor_path);
-    char *device_id = read_first_line_trim(dev_path);
-
-    char driver_target[PATH_MAX];
-    driver_target[0] = '\0';
-    ssize_t len = readlink(driver_link_path, driver_target, sizeof(driver_target) - 1);
-    if (len > 0) {
-        driver_target[len] = '\0';
-    }
-
-    const char *driver_name = NULL;
-    if (driver_target[0]) {
-        char *slash = strrchr(driver_target, '/');
-        driver_name = slash ? slash + 1 : driver_target;
-    }
-
-    const char *vendor_name = map_pci_vendor(vendor_id);
-
-    char buf[256];
-    if (vendor_id && device_id && driver_name) {
-        snprintf(buf, sizeof buf, "%s GPU (%s:%s, driver %s)",
-                 vendor_name, vendor_id, device_id, driver_name);
-    } else if (vendor_id && device_id) {
-        snprintf(buf, sizeof buf, "%s GPU (%s:%s)",
-                 vendor_name, vendor_id, device_id);
-    } else if (vendor_id) {
-        snprintf(buf, sizeof buf, "%s GPU", vendor_name);
-    } else {
-        snprintf(buf, sizeof buf, "unknown");
-    }
-
-    free(vendor_id);
-    free(device_id);
-    return xstrdup(buf);
-}
-
-/* ---------- display via DRM ---------- */
-
-static char *get_display_info(void) {
-    DIR *dir = opendir("/sys/class/drm");
-    if (!dir)
-        return xstrdup("unknown");
-
-    struct dirent *ent;
-    char desc[128];
-    desc[0] = '\0';
-
-    while ((ent = readdir(dir)) != NULL) {
-        if (!strchr(ent->d_name, '-'))
-            continue; /* skip card0 itself */
-
-            char base[PATH_MAX];
-        snprintf(base, sizeof base, "/sys/class/drm/%s", ent->d_name);
-
-        char status_path[PATH_MAX];
-        snprintf(status_path, sizeof status_path, "%s/status", base);
-        char *status = read_first_line_trim(status_path);
-        if (!status)
-            continue;
-        if (strcmp(status, "connected") != 0) {
-            free(status);
-            continue;
-        }
-        free(status);
-
-        char modes_path[PATH_MAX];
-        snprintf(modes_path, sizeof modes_path, "%s/modes", base);
-        FILE *f = fopen(modes_path, "r");
-        if (!f)
-            continue;
-
-        char mode[64];
-        if (fgets(mode, sizeof mode, f)) {
-            rstrip(mode);
-            const char *kind = "display";
-            if (strstr(ent->d_name, "eDP") || strstr(ent->d_name, "LVDS"))
-                kind = "internal";
-            else if (strstr(ent->d_name, "HDMI") || strstr(ent->d_name, "DP") || strstr(ent->d_name, "DVI"))
-                kind = "external";
-            snprintf(desc, sizeof desc, "%s (%s)", mode, kind);
-            fclose(f);
-            break;
         }
         fclose(f);
     }
+    return xstrdup("Unknown");
 
-    closedir(dir);
-
-    if (!desc[0])
-        return xstrdup("unknown");
-    return xstrdup(desc);
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+    struct statfs st;
+    if (statfs("/", &st) == 0)
+        return xstrdup(st.f_fstypename);
+    return xstrdup("Unknown");
+#else
+    return xstrdup("Unknown");
+#endif
 }
 
-/* ---------- network ---------- */
+static char *get_loadavg(double *one_min)
+{
+    double loadavg[3];
+    if (getloadavg(loadavg, 3) >= 1) {
+        if (one_min)
+            *one_min = loadavg[0];
+        char buf[64];
+        snprintf(buf, sizeof buf, "%.2f %.2f %.2f",
+                 loadavg[0], loadavg[1], loadavg[2]);
+        return xstrdup(buf);
+    }
+    if (one_min)
+        *one_min = -1.0;
+    return xstrdup("Unknown");
+}
 
-static char *get_network_info(void) {
+static char *get_network_info(void)
+{
     struct ifaddrs *ifaddr = NULL;
     if (getifaddrs(&ifaddr) == -1)
-        return xstrdup("offline");
+        return xstrdup("Offline");
 
-    struct ifaddrs *ifa;
     char result[128];
     result[0] = '\0';
 
-    for (ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+    for (struct ifaddrs *ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
         if (!ifa->ifa_addr)
             continue;
         if (ifa->ifa_addr->sa_family != AF_INET)
             continue;
 
         const char *name = ifa->ifa_name;
-        if (!name || strcmp(name, "lo") == 0)
+        if (!name)
+            continue;
+        
+        if (strcmp(name, "lo") == 0 || strcmp(name, "lo0") == 0)
             continue;
 
         struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
@@ -1090,13 +1069,15 @@ static char *get_network_info(void) {
         if (!inet_ntop(AF_INET, &sa->sin_addr, addr, sizeof addr))
             continue;
 
-        uint32_t m = ntohl(nm->sin_addr.s_addr);
         int prefix = 0;
-        for (int i = 0; i < 32; ++i) {
-            if (m & (1u << (31 - i)))
-                prefix++;
-            else
-                break;
+        if (nm) {
+            uint32_t m = ntohl(nm->sin_addr.s_addr);
+            for (int i = 0; i < 32; ++i) {
+                if (m & (1u << (31 - i)))
+                    prefix++;
+                else
+                    break;
+            }
         }
 
         snprintf(result, sizeof result, "%s %s/%d", name, addr, prefix);
@@ -1106,96 +1087,22 @@ static char *get_network_info(void) {
     freeifaddrs(ifaddr);
 
     if (!result[0])
-        return xstrdup("offline");
+        return xstrdup("Offline");
     return xstrdup(result);
 }
 
-/* ---------- locale + keyboard ---------- */
-
-static char *get_locale_str(void) {
-    const char *lang = getenv("LC_ALL");
-    if (!lang || !*lang)
-        lang = getenv("LC_CTYPE");
-    if (!lang || !*lang)
-        lang = getenv("LANG");
-    if (!lang || !*lang)
-        return xstrdup("unknown");
-    return xstrdup(lang);
-}
-
-static char *get_keyboard_layout(void) {
-    const char *env = getenv("XKB_DEFAULT_LAYOUT");
-    if (env && *env)
-        return xstrdup(env);
-
-    env = getenv("XKB_LAYOUT");
-    if (env && *env)
-        return xstrdup(env);
-
-    FILE *f = fopen("/etc/default/keyboard", "r");
-    if (!f)
-        return xstrdup("unknown");
-
-    char *line = NULL;
-    size_t cap = 0;
-    char *layout = NULL;
-
-    while (getline(&line, &cap, f) != -1) {
-        rstrip(line);
-        if (!line[0])
-            continue;
-        char *q = line;
-        while (*q == ' ' || *q == '\t')
-            q++;
-        if (*q == '#')
-            continue;
-
-        const char *keys[] = { "XKBLAYOUT=", "XKB_LAYOUT=" };
-        for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
-            size_t klen = strlen(keys[i]);
-            if (strncmp(q, keys[i], klen) == 0) {
-                char *val = q + klen;
-                while (*val == ' ' || *val == '\t')
-                    val++;
-                if (*val == '"' || *val == '\'') {
-                    char quote = *val++;
-                    char *end = strchr(val, quote);
-                    if (end)
-                        *end = '\0';
-                }
-                if (*val)
-                    layout = xstrdup(val);
-                break;
-            }
-        }
-        if (layout)
-            break;
-    }
-
-    free(line);
-    fclose(f);
-
-    if (!layout)
-        return xstrdup("unknown");
-    return layout;
-}
-
-/* ---------- processes + users ---------- */
-
-static char *get_process_count(void) {
+static char *get_process_count(void)
+{
+#if defined(__linux__)
     DIR *dir = opendir("/proc");
     if (!dir)
-        return xstrdup("unknown");
+        return xstrdup("Unknown");
 
-    struct dirent *ent;
     long count = 0;
-
+    struct dirent *ent;
+    
     while ((ent = readdir(dir)) != NULL) {
         const char *name = ent->d_name;
-
-        if (name[0] < '0' || name[0] > '9')
-            continue;
-
         bool all_digits = true;
         for (const char *p = name; *p; ++p) {
             if (*p < '0' || *p > '9') {
@@ -1203,27 +1110,69 @@ static char *get_process_count(void) {
                 break;
             }
         }
-        if (all_digits)
+        if (all_digits && name[0] != '\0')
             count++;
     }
-
     closedir(dir);
-
-    if (count <= 0)
-        return xstrdup("unknown");
 
     char buf[32];
     snprintf(buf, sizeof buf, "%ld", count);
     return xstrdup(buf);
+
+#elif defined(HAVE_SYSCTL)
+    int mib[3];
+    size_t len;
+    
+#if defined(__APPLE__)
+    mib[0] = CTL_KERN;
+    mib[1] = KERN_PROC;
+    mib[2] = KERN_PROC_ALL;
+    
+    if (sysctl(mib, 3, NULL, &len, NULL, 0) == 0) {
+        long count = len / sizeof(struct kinfo_proc);
+        char buf[32];
+        snprintf(buf, sizeof buf, "%ld", count);
+        return xstrdup(buf);
+    }
+#elif defined(__FreeBSD__) || defined(__DragonFly__)
+    mib[0] = CTL_KERN;
+    mib[1] = KERN_PROC;
+    mib[2] = KERN_PROC_ALL;
+    
+    if (sysctl(mib, 3, NULL, &len, NULL, 0) == 0) {
+        long count = len / sizeof(struct kinfo_proc);
+        char buf[32];
+        snprintf(buf, sizeof buf, "%ld", count);
+        return xstrdup(buf);
+    }
+#elif defined(__OpenBSD__) || defined(__NetBSD__)
+    mib[0] = CTL_KERN;
+    mib[1] = KERN_PROC;
+    mib[2] = KERN_PROC_ALL;
+    
+    if (sysctl(mib, 3, NULL, &len, NULL, 0) == 0) {
+        long count = len / sizeof(struct kinfo_proc);
+        char buf[32];
+        snprintf(buf, sizeof buf, "%ld", count);
+        return xstrdup(buf);
+    }
+#endif
+    return xstrdup("Unknown");
+#else
+    return xstrdup("Unknown");
+#endif
 }
 
-static char *get_user_summary(void) {
-    setutxent();
-    struct utmpx *ut;
+static char *get_user_summary(void)
+{
     char names[256];
     names[0] = '\0';
     int count = 0;
 
+#if defined(HAVE_UTMPX)
+    setutxent();
+    struct utmpx *ut;
+    
     while ((ut = getutxent()) != NULL) {
         if (ut->ut_type != USER_PROCESS)
             continue;
@@ -1231,6 +1180,7 @@ static char *get_user_summary(void) {
         char username[sizeof(ut->ut_user) + 1];
         memcpy(username, ut->ut_user, sizeof(ut->ut_user));
         username[sizeof(ut->ut_user)] = '\0';
+        
         if (!username[0])
             continue;
 
@@ -1244,8 +1194,35 @@ static char *get_user_summary(void) {
         }
         count++;
     }
-
     endutxent();
+
+#elif defined(HAVE_UTMP)
+    FILE *f = fopen(_PATH_UTMP, "r");
+    if (f) {
+        struct utmp ut;
+        while (fread(&ut, sizeof(ut), 1, f) == 1) {
+            if (ut.ut_name[0] == '\0')
+                continue;
+            if (ut.ut_line[0] == '\0')
+                continue;
+
+            char username[sizeof(ut.ut_name) + 1];
+            memcpy(username, ut.ut_name, sizeof(ut.ut_name));
+            username[sizeof(ut.ut_name)] = '\0';
+
+            if (strstr(names, username))
+                continue;
+
+            if (count < 5) {
+                if (names[0] != '\0')
+                    strncat(names, ", ", sizeof(names) - strlen(names) - 1);
+                strncat(names, username, sizeof(names) - strlen(names) - 1);
+            }
+            count++;
+        }
+        fclose(f);
+    }
+#endif
 
     if (count <= 0)
         return xstrdup("0");
@@ -1258,594 +1235,359 @@ static char *get_user_summary(void) {
     return xstrdup(buf);
 }
 
-/* ---------- session type + WM + terminal app ---------- */
+static long count_dir_entries(const char *path)
+{
+    DIR *dir = opendir(path);
+    if (!dir)
+        return -1;
 
-static char *read_comm_for_pid(pid_t pid) {
-    char path[64];
-    snprintf(path, sizeof path, "/proc/%ld/comm", (long)pid);
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return NULL;
-    char buf[64];
-    if (!fgets(buf, sizeof buf, f)) {
-        fclose(f);
-        return NULL;
+    long count = 0;
+    struct dirent *ent;
+    
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] != '.')
+            count++;
     }
-    fclose(f);
-    rstrip(buf);
+    closedir(dir);
+    return count > 0 ? count : -1;
+}
+
+static char *get_package_summary(void)
+{
+    char buf[256];
+    buf[0] = '\0';
+    int found = 0;
+
+#if defined(__linux__)
+    FILE *f = fopen("/var/lib/dpkg/status", "r");
+    if (f) {
+        char line[256];
+        long count = 0;
+        while (fgets(line, sizeof line, f)) {
+            if (strncmp(line, "Package:", 8) == 0)
+                count++;
+        }
+        fclose(f);
+        if (count > 0) {
+            char part[64];
+            snprintf(part, sizeof part, "%ld (dpkg)", count);
+            strncat(buf, part, sizeof(buf) - strlen(buf) - 1);
+            found = 1;
+        }
+    }
+
+    long pacman = count_dir_entries("/var/lib/pacman/local");
+    if (pacman > 0) {
+        char part[64];
+        snprintf(part, sizeof part, "%ld (pacman)", pacman);
+        if (found)
+            strncat(buf, " ", sizeof(buf) - strlen(buf) - 1);
+        strncat(buf, part, sizeof(buf) - strlen(buf) - 1);
+        found = 1;
+    }
+
+    char *rpm = run_command_first_line("rpm -qa 2>/dev/null | wc -l");
+    if (rpm) {
+        long count = strtol(rpm, NULL, 10);
+        free(rpm);
+        if (count > 0) {
+            char part[64];
+            snprintf(part, sizeof part, "%ld (rpm)", count);
+            if (found)
+                strncat(buf, " ", sizeof(buf) - strlen(buf) - 1);
+            strncat(buf, part, sizeof(buf) - strlen(buf) - 1);
+            found = 1;
+        }
+    }
+
+#elif defined(__APPLE__)
+    char *brew = run_command_first_line("brew list 2>/dev/null | wc -l");
+    if (brew) {
+        long count = strtol(brew, NULL, 10);
+        free(brew);
+        if (count > 0) {
+            char part[64];
+            snprintf(part, sizeof part, "%ld (brew)", count);
+            strncat(buf, part, sizeof(buf) - strlen(buf) - 1);
+            found = 1;
+        }
+    }
+
+#elif defined(__FreeBSD__) || defined(__DragonFly__)
+    char *pkg = run_command_first_line("pkg info -q 2>/dev/null | wc -l");
+    if (pkg) {
+        long count = strtol(pkg, NULL, 10);
+        free(pkg);
+        if (count > 0) {
+            char part[64];
+            snprintf(part, sizeof part, "%ld (pkg)", count);
+            strncat(buf, part, sizeof(buf) - strlen(buf) - 1);
+            found = 1;
+        }
+    }
+
+#elif defined(__OpenBSD__)
+    char *pkg = run_command_first_line("pkg_info 2>/dev/null | wc -l");
+    if (pkg) {
+        long count = strtol(pkg, NULL, 10);
+        free(pkg);
+        if (count > 0) {
+            char part[64];
+            snprintf(part, sizeof part, "%ld (pkg)", count);
+            strncat(buf, part, sizeof(buf) - strlen(buf) - 1);
+            found = 1;
+        }
+    }
+
+#elif defined(__NetBSD__)
+    char *pkg = run_command_first_line("pkg_info 2>/dev/null | wc -l");
+    if (pkg) {
+        long count = strtol(pkg, NULL, 10);
+        free(pkg);
+        if (count > 0) {
+            char part[64];
+            snprintf(part, sizeof part, "%ld (pkgsrc)", count);
+            strncat(buf, part, sizeof(buf) - strlen(buf) - 1);
+            found = 1;
+        }
+    }
+#endif
+
+    long flatpak_sys = count_dir_entries("/var/lib/flatpak/app");
+    const char *home = getenv("HOME");
+    long flatpak_user = -1;
+    if (home) {
+        char path[PATH_MAX];
+        snprintf(path, sizeof path, "%s/.local/share/flatpak/app", home);
+        flatpak_user = count_dir_entries(path);
+    }
+    long flatpak = 0;
+    if (flatpak_sys > 0)
+        flatpak += flatpak_sys;
+    if (flatpak_user > 0)
+        flatpak += flatpak_user;
+    if (flatpak > 0) {
+        char part[64];
+        snprintf(part, sizeof part, "%ld (flatpak)", flatpak);
+        if (found)
+            strncat(buf, " ", sizeof(buf) - strlen(buf) - 1);
+        strncat(buf, part, sizeof(buf) - strlen(buf) - 1);
+        found = 1;
+    }
+
+    if (!found)
+        return xstrdup("Unknown");
     return xstrdup(buf);
 }
 
-static pid_t get_ppid_of(pid_t pid) {
-    char path[64];
-    snprintf(path, sizeof path, "/proc/%ld/stat", (long)pid);
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return -1;
-
-    char buf[512];
-    if (!fgets(buf, sizeof buf, f)) {
-        fclose(f);
-        return -1;
-    }
-    fclose(f);
-
-    char *lpar = strchr(buf, '(');
-    char *rpar = strrchr(buf, ')');
-    if (!lpar || !rpar || rpar <= lpar)
-        return -1;
-
-    char *p = rpar + 2;
-    char state;
-    int ppid = -1;
-    if (sscanf(p, "%c %d", &state, &ppid) != 2)
-        return -1;
-
-    return (pid_t) ppid;
-}
-
-static bool looks_like_terminal_name(const char *comm) {
-    const char *terms[] = {
-        "konsole", "kitty", "alacritty", "gnome-terminal",
-        "xterm", "xfce4-terminal", "tilix", "st", "urxvt",
-        "wezterm", "foot", "rio", "termite", "hyper",
-        "yakuake", "guake", "qterminal", "lxterminal",
-        "kgx", "io.elementary.terminal", "deepin-terminal"
-    };
-    size_t n = sizeof(terms) / sizeof(terms[0]);
-    for (size_t i = 0; i < n; ++i) {
-        size_t len = strlen(terms[i]);
-        if (strncmp(comm, terms[i], len) == 0)
-            return true;
-    }
-    return false;
-}
-
-static char *guess_terminal_app(void) {
-    const char *term_prog = getenv("TERM_PROGRAM");
-    if (term_prog && *term_prog)
-        return xstrdup(term_prog);
-
-    pid_t pid = getppid();
-    for (int depth = 0; depth < 3 && pid > 1; ++depth) {
-        char *comm = read_comm_for_pid(pid);
-        if (!comm)
-            break;
-        if (looks_like_terminal_name(comm))
-            return comm;
-        free(comm);
-
-        pid = get_ppid_of(pid);
-        if (pid <= 1)
-            break;
-    }
-
-    const char *term = getenv("TERM");
-    if (term && *term)
-        return xstrdup(term);
-
-    return xstrdup("unknown");
-}
-
-static char *get_session_type(void) {
-    const char *xdg  = getenv("XDG_SESSION_TYPE");
-    const char *way  = getenv("WAYLAND_DISPLAY");
-    const char *disp = getenv("DISPLAY");
-
-    if (xdg && *xdg)
-        return xstrdup(xdg);
-    if (way && *way)
-        return xstrdup("wayland");
-    if (disp && *disp)
-        return xstrdup("x11");
-    return xstrdup("tty");
-}
-
-static bool looks_like_wm_name(const char *comm) {
-    const char *wms[] = {
-        "kwin_x11", "kwin_wayland", "kwin",
-        "mutter", "gnome-shell",
-        "sway", "i3", "i3wm", "bspwm",
-        "openbox", "fluxbox", "xmonad", "awesome",
-        "herbstluftwm", "qtile", "marco", "metacity",
-        "icewm", "enlightenment", "pekwm", "blackbox"
-    };
-    size_t n = sizeof(wms) / sizeof(wms[0]);
-    for (size_t i = 0; i < n; ++i) {
-        if (strcmp(comm, wms[i]) == 0)
-            return true;
-    }
-    return false;
-}
-
-static char *normalize_wm_name(const char *comm) {
-    if (strncmp(comm, "kwin", 4) == 0)
-        return xstrdup("kwin");
-    if (strcmp(comm, "gnome-shell") == 0 || strcmp(comm, "mutter") == 0)
-        return xstrdup("mutter");
-    return xstrdup(comm);
-}
-
-static char *get_window_manager(const char *session_type) {
-    char type_buf[16];
-    const char *type = (session_type && *session_type) ? session_type : "unknown";
-
-    size_t i;
-    for (i = 0; i < sizeof(type_buf) - 1 && type[i]; ++i)
-        type_buf[i] = (char)tolower((unsigned char)type[i]);
-    type_buf[i] = '\0';
-
-    if (strcmp(type_buf, "tty") == 0)
-        return xstrdup("none (tty)");
-
-    DIR *dir = opendir("/proc");
-    if (!dir) {
-        char buf[64];
-        snprintf(buf, sizeof buf, "unknown (%s)", type_buf);
-        return xstrdup(buf);
-    }
+static char *get_battery_status(void)
+{
+#if defined(__linux__)
+    DIR *dir = opendir("/sys/class/power_supply");
+    if (!dir)
+        return xstrdup("N/A");
 
     struct dirent *ent;
-    char *found = NULL;
+    char *result = NULL;
 
     while ((ent = readdir(dir)) != NULL) {
-        const char *name = ent->d_name;
-
-        if (name[0] < '0' || name[0] > '9')
+        if (strncmp(ent->d_name, "BAT", 3) != 0)
             continue;
 
-        bool all_digits = true;
-        for (const char *p = name; *p; ++p) {
-            if (*p < '0' || *p > '9') {
-                all_digits = false;
-                break;
+        char path[PATH_MAX];
+        
+        snprintf(path, sizeof path, "/sys/class/power_supply/%s/capacity", ent->d_name);
+        char *cap = read_first_line_trim(path);
+        
+        snprintf(path, sizeof path, "/sys/class/power_supply/%s/status", ent->d_name);
+        char *status = read_first_line_trim(path);
+
+        if (cap && status) {
+            char buf[128];
+            snprintf(buf, sizeof buf, "%s%% (%s)", cap, status);
+            result = xstrdup(buf);
+        } else if (cap) {
+            char buf[64];
+            snprintf(buf, sizeof buf, "%s%%", cap);
+            result = xstrdup(buf);
+        }
+
+        free(cap);
+        free(status);
+        
+        if (result)
+            break;
+    }
+    closedir(dir);
+    return result ? result : xstrdup("N/A");
+
+#elif defined(__APPLE__)
+    char *output = run_command_first_line(
+        "pmset -g batt 2>/dev/null | grep -Eo '[0-9]+%.*' | head -1");
+    if (output)
+        return output;
+    return xstrdup("N/A");
+
+#elif defined(__FreeBSD__) || defined(__DragonFly__)
+    int life, state;
+    size_t len;
+    
+    len = sizeof(life);
+    if (sysctlbyname("hw.acpi.battery.life", &life, &len, NULL, 0) == 0) {
+        len = sizeof(state);
+        sysctlbyname("hw.acpi.battery.state", &state, &len, NULL, 0);
+        
+        const char *status;
+        if (state == 1)
+            status = "Discharging";
+        else if (state == 2)
+            status = "Charging";
+        else
+            status = "Unknown";
+        
+        char buf[64];
+        snprintf(buf, sizeof buf, "%d%% (%s)", life, status);
+        return xstrdup(buf);
+    }
+    return xstrdup("N/A");
+
+#elif defined(__OpenBSD__)
+    int mib[5] = { CTL_HW, HW_SENSORS, 0, SENSOR_PERCENT, 0 };
+    struct sensor sens;
+    size_t len = sizeof(sens);
+    
+    for (int dev = 0; dev < 10; dev++) {
+        mib[2] = dev;
+        if (sysctl(mib, 5, &sens, &len, NULL, 0) == 0) {
+            if (sens.status == SENSOR_S_OK) {
+                char buf[32];
+                snprintf(buf, sizeof buf, "%.0f%%", sens.value / 1000.0);
+                return xstrdup(buf);
             }
         }
-        if (!all_digits)
-            continue;
+    }
+    return xstrdup("N/A");
 
-        pid_t pid = (pid_t)strtol(name, NULL, 10);
-        if (pid <= 1)
-            continue;
+#else
+    return xstrdup("N/A");
+#endif
+}
 
-        char *comm = read_comm_for_pid(pid);
-        if (!comm)
-            continue;
+static char *get_gpu_info(void)
+{
+#if defined(__linux__)
+    DIR *dir = opendir("/sys/class/drm");
+    if (!dir)
+        return xstrdup("Unknown");
 
-        if (looks_like_wm_name(comm)) {
-            found = normalize_wm_name(comm);
-            free(comm);
+    struct dirent *ent;
+    char device_path[PATH_MAX];
+    device_path[0] = '\0';
+
+    while ((ent = readdir(dir)) != NULL) {
+        if (strncmp(ent->d_name, "card", 4) == 0 &&
+            strchr(ent->d_name, '-') == NULL) {
+            snprintf(device_path, sizeof device_path,
+                     "/sys/class/drm/%s/device", ent->d_name);
             break;
         }
-
-        free(comm);
     }
-
     closedir(dir);
 
-    char buf[128];
+    if (!device_path[0])
+        return xstrdup("Unknown");
 
-    if (found) {
-        snprintf(buf, sizeof buf, "%s (%s)", found, type_buf);
-        free(found);
-        return xstrdup(buf);
-    } else {
-        snprintf(buf, sizeof buf, "unknown (%s)", type_buf);
-        return xstrdup(buf);
-    }
-}
+    char vendor_path[PATH_MAX];
+    snprintf(vendor_path, sizeof vendor_path, "%s/vendor", device_path);
+    char *vendor_id = read_first_line_trim(vendor_path);
 
-static char *get_terminal_display(const char *term_env, const char *tty_path) {
-    char *app = guess_terminal_app();
-
-    const char *term = (term_env && *term_env) ? term_env : "unknown";
-    const char *tty  = (tty_path && *tty_path && strcmp(tty_path, "not a tty") != 0)
-    ? tty_path
-    : NULL;
-
-    char buf[256];
-
-    if (app && *app && strcmp(app, term) != 0 && strcmp(app, "unknown") != 0) {
-        if (tty)
-            snprintf(buf, sizeof buf, "%s (TERM=%s, %s)", app, term, tty);
-        else
-            snprintf(buf, sizeof buf, "%s (TERM=%s)", app, term);
-    } else {
-        if (tty && strncmp(tty, "/dev/tty", 8) == 0) {
-            snprintf(buf, sizeof buf, "Linux TTY (%s, TERM=%s)", tty, term);
-        } else if (tty) {
-            snprintf(buf, sizeof buf, "%s (%s)", term, tty);
-        } else {
-            snprintf(buf, sizeof buf, "%s", term);
-        }
+    const char *vendor_name = "Unknown";
+    if (vendor_id) {
+        if (strcmp(vendor_id, "0x8086") == 0)
+            vendor_name = "Intel";
+        else if (strcmp(vendor_id, "0x10de") == 0)
+            vendor_name = "NVIDIA";
+        else if (strcmp(vendor_id, "0x1002") == 0 || strcmp(vendor_id, "0x1022") == 0)
+            vendor_name = "AMD";
+        free(vendor_id);
     }
 
-    free(app);
+    char buf[64];
+    snprintf(buf, sizeof buf, "%s GPU", vendor_name);
     return xstrdup(buf);
+
+#elif defined(__APPLE__)
+    char *output = run_command_first_line(
+        "system_profiler SPDisplaysDataType 2>/dev/null | grep 'Chipset Model' | head -1 | cut -d: -f2");
+    if (output) {
+        while (*output == ' ')
+            output++;
+        return xstrdup(output);
+    }
+    return xstrdup("Unknown");
+
+#elif defined(__FreeBSD__) || defined(__DragonFly__)
+    char *output = run_command_first_line("pciconf -lv 2>/dev/null | grep -A4 'vgapci' | grep device | head -1");
+    if (output)
+        return output;
+    return xstrdup("Unknown");
+
+#elif defined(__OpenBSD__) || defined(__NetBSD__)
+    char *output = run_command_first_line("pcidump 2>/dev/null | grep -i 'vga\\|display' | head -1");
+    if (output)
+        return output;
+    return xstrdup("Unknown");
+
+#else
+    return xstrdup("Unknown");
+#endif
 }
 
-/* ---------- fonts ---------- */
-
-static char *parse_font_spec(const char *spec) {
-    if (!spec || !*spec)
-        return xstrdup("unknown");
-
-    char *tmp = xstrdup(spec);
-    char *save = NULL;
-    char *family = strtok_r(tmp, ",", &save);
-    char *size_str = strtok_r(NULL, ",", &save);
-
-    if (!family) {
-        free(tmp);
-        return xstrdup("unknown");
-    }
-
-    while (*family == ' ' || *family == '\t')
-        family++;
-    char *end = family + strlen(family);
-    while (end > family && (end[-1] == ' ' || end[-1] == '\t'))
-        *--end = '\0';
-
-    char result[256];
-
-    if (size_str) {
-        while (*size_str == ' ' || *size_str == '\t')
-            size_str++;
-        char *p = size_str;
-        while (*p && isdigit((unsigned char)*p))
-            p++;
-        *p = '\0';
-        if (*size_str)
-            snprintf(result, sizeof result, "%s (%spt)", family, size_str);
-        else
-            snprintf(result, sizeof result, "%s", family);
-    } else {
-        snprintf(result, sizeof result, "%s", family);
-    }
-
-    free(tmp);
-    return xstrdup(result);
+static char *get_locale_str(void)
+{
+    const char *lang = getenv("LC_ALL");
+    if (!lang || !*lang)
+        lang = getenv("LC_CTYPE");
+    if (!lang || !*lang)
+        lang = getenv("LANG");
+    if (!lang || !*lang)
+        return xstrdup("C");
+    return xstrdup(lang);
 }
 
-static char *get_fc_match_font(const char *pattern) {
-    char cmd[128];
-    if (pattern && *pattern)
-        snprintf(cmd, sizeof cmd, "fc-match %s 2>/dev/null", pattern);
-    else
-        snprintf(cmd, sizeof cmd, "fc-match 2>/dev/null");
+static char *get_session_type(void)
+{
+    const char *xdg = getenv("XDG_SESSION_TYPE");
+    if (xdg && *xdg)
+        return xstrdup(xdg);
 
-    FILE *pipe = popen(cmd, "r");
-    if (!pipe)
-        return NULL;
+    const char *way = getenv("WAYLAND_DISPLAY");
+    if (way && *way)
+        return xstrdup("wayland");
 
-    char buf[256];
-    if (!fgets(buf, sizeof buf, pipe)) {
-        pclose(pipe);
-        return NULL;
-    }
-    pclose(pipe);
-    rstrip(buf);
-    if (!buf[0])
-        return NULL;
+    const char *disp = getenv("DISPLAY");
+    if (disp && *disp)
+        return xstrdup("x11");
 
-    char *colon = strchr(buf, ':');
-    char *p = buf;
-    if (colon) {
-        p = colon + 1;
-        while (*p == ' ' || *p == '\t')
-            p++;
-    }
-
-    char *style = strstr(p, ":style=");
-    if (style)
-        *style = '\0';
-
-    rstrip(p);
-    if (!*p)
-        return NULL;
-
-    if (*p == '"') {
-        char *p2 = p + 1;
-        char *end1 = strchr(p2, '"');
-        if (end1) {
-            *end1 = '\0';
-            const char *family = p2;
-
-            char *after = end1 + 1;
-            while (*after == ' ' || *after == '\t')
-                after++;
-
-            const char *style_name = NULL;
-            if (*after == '"') {
-                after++;
-                char *end2 = strchr(after, '"');
-                if (end2) {
-                    *end2 = '\0';
-                    style_name = after;
-                }
-            }
-
-            char out[256];
-            if (style_name && *style_name)
-                snprintf(out, sizeof out, "%s (%s)", family, style_name);
-            else
-                snprintf(out, sizeof out, "%s", family);
-            return xstrdup(out);
-        }
-    }
-
-    return xstrdup(p);
+#if defined(__APPLE__)
+    return xstrdup("aqua");
+#else
+    return xstrdup("tty");
+#endif
 }
 
-static char *get_system_font(void) {
-    const char *home = getenv("HOME");
-    if (!home || !*home) {
-        char *fc = get_fc_match_font(NULL);
-        return fc ? fc : xstrdup("unknown");
-    }
-
-    const char *rel_paths[] = {
-        "/.config/kdeglobals",
-        "/.config/kdeglobals6",
-        "/.config/kdeglobals5"
-    };
-
-    char path[PATH_MAX];
-    char *font_spec = NULL;
-
-    for (size_t i = 0; i < sizeof(rel_paths) / sizeof(rel_paths[0]); ++i) {
-        snprintf(path, sizeof path, "%s%s", home, rel_paths[i]);
-        FILE *f = fopen(path, "r");
-        if (!f)
-            continue;
-
-        char *line = NULL;
-        size_t cap = 0;
-        bool in_general = false;
-
-        while (getline(&line, &cap, f) != -1) {
-            rstrip(line);
-            if (line[0] == '\0')
-                continue;
-
-            char *q = line;
-            while (*q == ' ' || *q == '\t')
-                q++;
-            if (*q == '#' || *q == ';')
-                continue;
-
-            if (*q == '[') {
-                in_general = (strcmp(q, "[General]") == 0 ||
-                strcmp(q, "[KDE]") == 0);
-                continue;
-            }
-            if (!in_general)
-                continue;
-
-            char *eq = strchr(q, '=');
-            if (!eq)
-                continue;
-
-            *eq = '\0';
-            char *key = q;
-            char *val = eq + 1;
-            while (*val == ' ' || *val == '\t')
-                val++;
-
-            if (!*val)
-                continue;
-
-            char keybuf[64];
-            size_t klen = strlen(key);
-            if (klen >= sizeof keybuf)
-                klen = sizeof keybuf - 1;
-            for (size_t j = 0; j < klen; ++j)
-                keybuf[j] = (char)tolower((unsigned char)key[j]);
-            keybuf[klen] = '\0';
-
-            if (strcmp(keybuf, "font") == 0 ||
-                strcmp(keybuf, "generalfont") == 0 ||
-                strcmp(keybuf, "menufont") == 0 ||
-                strcmp(keybuf, "activefont") == 0) {
-                font_spec = xstrdup(val);
-            break;
-                }
-        }
-
-        free(line);
-        fclose(f);
-
-        if (font_spec)
-            break;
-    }
-
-    if (font_spec) {
-        char *res = parse_font_spec(font_spec);
-        free(font_spec);
-        return res;
-    }
-
-    char *fc = get_fc_match_font(NULL);
-    if (fc)
-        return fc;
-
-    return xstrdup("unknown");
-}
-
-static char *read_konsole_font_from_profile(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return NULL;
-
-    char *line = NULL;
-    size_t cap = 0;
-    char *font_spec = NULL;
-
-    while (getline(&line, &cap, f) != -1) {
-        rstrip(line);
-        if (line[0] == '\0')
-            continue;
-        char *q = line;
-        while (*q == ' ' || *q == '\t')
-            q++;
-        const char *key = "Font=";
-        size_t klen = strlen(key);
-        if (strncmp(q, key, klen) == 0) {
-            const char *val = q + klen;
-            while (*val == ' ' || *val == '\t')
-                val++;
-            if (*val)
-                font_spec = xstrdup(val);
-            break;
-        }
-    }
-
-    free(line);
-    fclose(f);
-
-    if (!font_spec)
-        return NULL;
-
-    char *res = parse_font_spec(font_spec);
-    free(font_spec);
-    return res;
-}
-
-static char *get_terminal_font(void) {
-    const char *home = getenv("HOME");
-    if (!home || !*home) {
-        goto fc_fallback;
-    }
-
-    char *app = guess_terminal_app();
-    bool is_konsole = (app && strncmp(app, "konsole", 7) == 0);
-    free(app);
-
-    if (!is_konsole)
-        goto fc_fallback;
-
-    char profile_name[PATH_MAX];
-    profile_name[0] = '\0';
-
-    const char *pe = getenv("KONSOLE_PROFILE_NAME");
-    if (!pe || !*pe)
-        pe = getenv("KONSOLE_PROFILE");
-    if (pe && *pe) {
-        snprintf(profile_name, sizeof profile_name, "%s", pe);
-    }
-
-    if (profile_name[0] == '\0') {
-        char rcpath[PATH_MAX];
-        snprintf(rcpath, sizeof rcpath, "%s/.config/konsolerc", home);
-        FILE *f = fopen(rcpath, "r");
-        if (f) {
-            char *line = NULL;
-            size_t cap = 0;
-            while (getline(&line, &cap, f) != -1) {
-                rstrip(line);
-                if (line[0] == '\0')
-                    continue;
-                char *q = line;
-                while (*q == ' ' || *q == '\t')
-                    q++;
-                const char *key = "DefaultProfile=";
-                size_t klen = strlen(key);
-                if (strncmp(q, key, klen) == 0) {
-                    const char *val = q + klen;
-                    while (*val == ' ' || *val == '\t')
-                        val++;
-                    if (*val) {
-                        snprintf(profile_name, sizeof profile_name, "%s", val);
-                    }
-                    break;
-                }
-            }
-            free(line);
-            fclose(f);
-        }
-    }
-
-    if (profile_name[0] != '\0') {
-        char p1[PATH_MAX], p2[PATH_MAX];
-        snprintf(p1, sizeof p1, "%s/.local/share/konsole/%s", home, profile_name);
-        snprintf(p2, sizeof p2, "%s/.local/share/konsole/%s.profile", home, profile_name);
-
-        char *f1 = read_konsole_font_from_profile(p1);
-        if (!f1)
-            f1 = read_konsole_font_from_profile(p2);
-        if (f1)
-            return f1;
-    }
-
-    {
-        char dirpath[PATH_MAX];
-        snprintf(dirpath, sizeof dirpath, "%s/.local/share/konsole", home);
-        DIR *d = opendir(dirpath);
-        if (d) {
-            struct dirent *ent;
-            char first_profile[PATH_MAX];
-            first_profile[0] = '\0';
-
-            while ((ent = readdir(d)) != NULL) {
-                if (ent->d_name[0] == '.')
-                    continue;
-                const char *dot = strrchr(ent->d_name, '.');
-                if (dot && strcmp(dot, ".profile") == 0) {
-                    snprintf(first_profile, sizeof first_profile,
-                             "%s/%s", dirpath, ent->d_name);
-                    break;
-                }
-            }
-            closedir(d);
-
-            if (first_profile[0] != '\0') {
-                char *res = read_konsole_font_from_profile(first_profile);
-                if (res)
-                    return res;
-            }
-        }
-    }
-
-    fc_fallback:
-    {
-        char *fc = get_fc_match_font("monospace");
-        if (fc)
-            return fc;
-    }
-    return xstrdup("unknown");
-}
-
-/* ---------- bars ---------- */
-
-static char *make_bar(double percent, int width) {
-    if (width < 1) width = 10;
-    if (percent < 0) percent = 0;
-    if (percent > 100) percent = 100;
+static char *make_bar(double percent, int width)
+{
+    if (width < 1)
+        width = 10;
+    if (percent < 0)
+        percent = 0;
+    if (percent > 100)
+        percent = 100;
+    
     int filled = (int)((percent / 100.0) * width + 0.5);
 
-    char *buf = malloc((size_t)width + 3);
-    if (!buf) die("malloc");
-
+    char *buf = xmalloc((size_t)width + 3);
     buf[0] = '[';
     for (int i = 0; i < width; ++i)
         buf[1 + i] = (i < filled) ? '=' : ' ';
@@ -1855,9 +1597,8 @@ static char *make_bar(double percent, int width) {
     return buf;
 }
 
-/* ---------- UI helpers ---------- */
-
-static void print_header(const char *user, const char *host) {
+static void print_header(const char *user, const char *host)
+{
     char buf[256];
     snprintf(buf, sizeof buf, "%s@%s", user, host);
 
@@ -1865,13 +1606,8 @@ static void print_header(const char *user, const char *host) {
     snprintf(ver, sizeof ver, "YAFP v%s — yet another fetch program", YAFP_VERSION);
 
     if (g_use_color) {
-        fputs("\033[1;38;5;45m", stdout);
-        fputs(buf, stdout);
-        fputs("\033[0m\n", stdout);
-
-        fputs("\033[38;5;240m", stdout);
-        fputs(ver, stdout);
-        fputs("\033[0m\n", stdout);
+        printf("\033[1;38;5;45m%s\033[0m\n", buf);
+        printf("\033[38;5;240m%s\033[0m\n", ver);
     } else {
         puts(buf);
         puts(ver);
@@ -1888,40 +1624,33 @@ static void print_header(const char *user, const char *host) {
     putchar('\n');
 }
 
-static void print_section(const char *name) {
+static void print_section(const char *name)
+{
     if (g_minimal)
         return;
 
     putchar('\n');
-    if (g_use_color) {
-        fputs("\033[38;5;117m", stdout);
+    if (g_use_color)
+        printf("\033[38;5;117m[ %s ]\033[0m\n", name);
+    else
         printf("[ %s ]\n", name);
-        fputs("\033[0m", stdout);
-    } else {
-        printf("[ %s ]\n", name);
-    }
 }
 
-static void print_kv(const char *label, const char *value) {
+static void print_kv(const char *label, const char *value)
+{
     if (!value)
         value = "";
 
     if (g_use_color) {
-        fputs("  ", stdout);
-        fputs("\033[38;5;213m", stdout);
-        fprintf(stdout, "%-*s", LABEL_WIDTH, label);
-        fputs("\033[0m : ", stdout);
-        fputs("\033[38;5;81m", stdout);
-        fputs(value, stdout);
-        fputs("\033[0m\n", stdout);
+        printf("  \033[38;5;213m%-*s\033[0m : \033[38;5;81m%s\033[0m\n",
+               LABEL_WIDTH, label, value);
     } else {
         printf("  %-*s : %s\n", LABEL_WIDTH, label, value);
     }
 }
 
-/* ---------- help ---------- */
-
-static void print_help(const char *prog) {
+static void print_help(const char *prog)
+{
     printf("yafp %s - Yet Another Fetch Program\n\n", YAFP_VERSION);
     printf("Usage: %s [options]\n\n", prog);
     printf("Options:\n");
@@ -1929,12 +1658,13 @@ static void print_help(const char *prog) {
     printf("  -v, --version    Show version\n");
     printf("      --no-color   Disable ANSI colors\n");
     printf("      --plain      Plain mode (no colors, full info)\n");
-    printf("      --minimal    Only core fields (OS, kernel, uptime, memory)\n");
+    printf("      --minimal    Only core fields (OS, kernel, uptime, memory)\n\n");
+    printf("Supported platforms:\n");
+    printf("  Linux, macOS, FreeBSD, OpenBSD, NetBSD, DragonFlyBSD\n");
 }
 
-/* ---------- main ---------- */
-
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     const char *progname = (argc > 0 && argv[0]) ? argv[0] : "yafp";
 
     if (getenv("NO_COLOR"))
@@ -1954,7 +1684,7 @@ int main(int argc, char **argv) {
             g_use_color = false;
         } else if (strcmp(arg, "--plain") == 0) {
             g_use_color = false;
-            g_minimal   = false;
+            g_minimal = false;
         } else if (strcmp(arg, "--minimal") == 0) {
             g_minimal = true;
         } else {
@@ -1964,57 +1694,47 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* collect all info */
+    char *user = get_username();
+    char *host = get_hostname_simple();
+    char *os_name = get_os_pretty_name();
+    char *host_model = get_host_model();
+    char *kernel = get_kernel_release();
+    char *arch = get_architecture();
 
-    char *user         = get_username();
-    char *host         = get_hostname_simple();
-    char *os_name      = get_os_pretty_name();
-    char *host_model   = get_host_model();
-    char *kernel       = get_kernel_release();
-    char *arch         = get_architecture();
-
-    long  uptime_secs  = 0;
-    char *uptime       = format_uptime(&uptime_secs);
-    time_t now         = 0;
-    char *run_time     = get_run_datetime(&now);
-    char *boot_time    = format_boot_time(now, uptime_secs);
+    long uptime_secs = 0;
+    char *uptime = format_uptime(&uptime_secs);
+    time_t now = 0;
+    char *run_time = get_run_datetime(&now);
+    char *boot_time = format_boot_time(now, uptime_secs);
 
     double load1 = -1.0;
-    char *loadavg      = get_loadavg(&load1);
+    char *loadavg = get_loadavg(&load1);
 
-    char *shell        = get_shell_name();
-    char *term_env     = get_term_env();
-    char *tty_size     = get_tty_size();
-    char *tty_path     = get_tty_path();
-    char *de_session   = get_de_session();
-
-    long cpu_threads   = 0;
-    char *cpu_info     = get_cpu_info(&cpu_threads);
-    char *cpu_gov      = get_cpu_governor();
-    char *cpu_temp     = get_cpu_temp();
-
-    double mem_pct  = -1.0, swap_pct = -1.0, disk_pct = -1.0;
-    char *mem_usage    = get_memory_usage(&mem_pct);
-    char *swap_usage   = get_swap_usage(&swap_pct);
-    char *disk_usage   = get_disk_root_usage(&disk_pct);
-    char *fs_type      = get_root_fs_type();
-    char *disk_type    = get_root_disk_type();
-
-    char *proc_count   = get_process_count();
-    char *pkg_summary  = get_package_summary();
-    char *battery      = get_battery_status();
-    char *gcc_version  = get_gcc_version();
+    char *shell = get_shell_name();
+    char *term_env = get_term_env();
+    char *tty_size = get_tty_size();
+    char *tty_path = get_tty_path();
+    char *de_session = get_de_session();
     char *session_type = get_session_type();
-    char *wm_display   = get_window_manager(session_type);
-    char *term_disp    = get_terminal_display(term_env, tty_path);
-    char *sys_font     = get_system_font();
-    char *term_font    = get_terminal_font();
-    char *gpu_info     = get_gpu_info();
-    char *display_info = get_display_info();
-    char *net_info     = get_network_info();
-    char *locale_str   = get_locale_str();
+
+    long cpu_threads = 0;
+    char *cpu_info = get_cpu_info(&cpu_threads);
+    char *cpu_gov = get_cpu_governor();
+    char *cpu_temp = get_cpu_temp();
+
+    double mem_pct = -1.0, swap_pct = -1.0, disk_pct = -1.0;
+    char *mem_usage = get_memory_usage(&mem_pct);
+    char *swap_usage = get_swap_usage(&swap_pct);
+    char *disk_usage = get_disk_root_usage(&disk_pct);
+    char *fs_type = get_root_fs_type();
+
+    char *proc_count = get_process_count();
+    char *pkg_summary = get_package_summary();
+    char *battery = get_battery_status();
+    char *gpu_info = get_gpu_info();
+    char *net_info = get_network_info();
+    char *locale_str = get_locale_str();
     char *user_summary = get_user_summary();
-    char *kbd_layout   = get_keyboard_layout();
 
     if (strcmp(user_summary, "0") == 0) {
         free(user_summary);
@@ -2024,37 +1744,38 @@ int main(int argc, char **argv) {
     }
 
     double cpu_pct = -1.0;
-    if (cpu_threads < 1) cpu_threads = 1;
+    if (cpu_threads < 1)
+        cpu_threads = 1;
     if (load1 >= 0.0) {
         cpu_pct = (load1 / (double)cpu_threads) * 100.0;
-        if (cpu_pct < 0.0) cpu_pct = 0.0;
-        if (cpu_pct > 100.0) cpu_pct = 100.0;
+        if (cpu_pct > 100.0)
+            cpu_pct = 100.0;
     }
 
-    char *cpu_bar  = (cpu_pct  >= 0.0) ? make_bar(cpu_pct, 20)  : xstrdup("");
-    char *mem_bar  = (mem_pct  >= 0.0) ? make_bar(mem_pct, 20)  : xstrdup("");
+    char *cpu_bar = (cpu_pct >= 0.0) ? make_bar(cpu_pct, 20) : xstrdup("");
+    char *mem_bar = (mem_pct >= 0.0) ? make_bar(mem_pct, 20) : xstrdup("");
     char *swap_bar = (swap_pct >= 0.0) ? make_bar(swap_pct, 20) : xstrdup("");
     char *disk_bar = (disk_pct >= 0.0) ? make_bar(disk_pct, 20) : xstrdup("");
 
     print_header(user, host);
 
     if (g_minimal) {
-        print_kv("OS",      os_name);
-        print_kv("Kernel",  kernel);
-        print_kv("Uptime",  uptime);
-        print_kv("Memory",  mem_usage);
+        print_kv("OS", os_name);
+        print_kv("Kernel", kernel);
+        print_kv("Uptime", uptime);
+        print_kv("Memory", mem_usage);
     } else {
         print_section("System");
-        print_kv("OS",        os_name);
-        print_kv("Host",      host_model);
-        print_kv("Kernel",    kernel);
-        print_kv("Arch",      arch);
+        print_kv("OS", os_name);
+        print_kv("Host", host_model);
+        print_kv("Kernel", kernel);
+        print_kv("Arch", arch);
 
         char up_line[160];
         snprintf(up_line, sizeof up_line, "%s (boot %s)", uptime, boot_time);
-        print_kv("Uptime",    up_line);
-        print_kv("Run time",  run_time);
-        print_kv("Load avg",  loadavg);
+        print_kv("Uptime", up_line);
+        print_kv("Run time", run_time);
+        print_kv("Load avg", loadavg);
 
         if (cpu_bar[0]) {
             char cpu_load_line[160];
@@ -2065,18 +1786,16 @@ int main(int argc, char **argv) {
             print_kv("CPU load", cpu_load_line);
         }
 
-        print_kv("Packages",  pkg_summary);
+        print_kv("Packages", pkg_summary);
         print_kv("Processes", proc_count);
-        print_kv("Users",     user_summary);
-        print_kv("Locale",    locale_str);
-        print_kv("GCC",       gcc_version);
+        print_kv("Users", user_summary);
+        print_kv("Locale", locale_str);
 
         print_section("Hardware");
-        print_kv("CPU",        cpu_info);
-        print_kv("CPU gov",    cpu_gov);
-        print_kv("CPU temp",   cpu_temp);
-        print_kv("GPU",        gpu_info);
-        print_kv("Display",    display_info);
+        print_kv("CPU", cpu_info);
+        print_kv("CPU gov", cpu_gov);
+        print_kv("CPU temp", cpu_temp);
+        print_kv("GPU", gpu_info);
 
         if (mem_bar[0]) {
             char mem_line[192];
@@ -2102,25 +1821,19 @@ int main(int argc, char **argv) {
             print_kv("Disk (/)", disk_usage);
         }
 
-        char fs_line[160];
-        snprintf(fs_line, sizeof fs_line, "%s, %s", fs_type, disk_type);
-        print_kv("FS / Disk", fs_line);
-
-        print_kv("Network",    net_info);
-        print_kv("Battery",    battery);
+        print_kv("Filesystem", fs_type);
+        print_kv("Network", net_info);
+        print_kv("Battery", battery);
 
         print_section("Session");
-        print_kv("Shell",      shell);
-        print_kv("Terminal",   term_disp);
-        print_kv("WM",         wm_display);
-        print_kv("DE / Sess",  de_session);
-        print_kv("Font (sys)", sys_font);
-        print_kv("Font (term)",term_font);
-        print_kv("Keyboard",   kbd_layout);
+        print_kv("Shell", shell);
+        print_kv("Terminal", term_env);
+        print_kv("Session", session_type);
+        print_kv("DE / Sess", de_session);
 
         char tty_line[160];
         snprintf(tty_line, sizeof tty_line, "%s (%s)", tty_path, tty_size);
-        print_kv("TTY",        tty_line);
+        print_kv("TTY", tty_line);
     }
 
     free(user);
@@ -2138,6 +1851,7 @@ int main(int argc, char **argv) {
     free(tty_size);
     free(tty_path);
     free(de_session);
+    free(session_type);
     free(cpu_info);
     free(cpu_gov);
     free(cpu_temp);
@@ -2145,22 +1859,13 @@ int main(int argc, char **argv) {
     free(swap_usage);
     free(disk_usage);
     free(fs_type);
-    free(disk_type);
     free(proc_count);
     free(pkg_summary);
     free(battery);
-    free(gcc_version);
-    free(session_type);
-    free(wm_display);
-    free(term_disp);
-    free(sys_font);
-    free(term_font);
     free(gpu_info);
-    free(display_info);
     free(net_info);
     free(locale_str);
     free(user_summary);
-    free(kbd_layout);
     free(cpu_bar);
     free(mem_bar);
     free(swap_bar);
