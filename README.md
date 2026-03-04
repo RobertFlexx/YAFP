@@ -1,6 +1,6 @@
 # YAFP - Yet Another Fetch Program
 
-A lightweight, comprehensive system information tool for Linux written in C.
+A lightweight, comprehensive system information tool for Linux, OpenBSD, macOS, FreeBSD, NetBSD, DragonFlyBSD, and more; written in C.
 
 ## Overview
 
