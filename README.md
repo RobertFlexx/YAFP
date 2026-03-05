@@ -4,7 +4,7 @@ A lightweight, comprehensive system information tool for Linux, OpenBSD, macOS, 
 
 ## Overview
 
-YAFP is a system information fetcher that displays detailed information about your Linux system, including hardware specs, resource usage, session details, and more. It provides color-coded output with visual progress bars for resource monitoring.
+YAFP is a system information fetcher that displays detailed information about your Linux/BSD (including macOS) system, including hardware specs, resource usage, session details, and more. It provides color-coded output with visual progress bars for resource monitoring.
 
 ## Features
 
